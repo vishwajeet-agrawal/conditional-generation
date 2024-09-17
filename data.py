@@ -6,6 +6,11 @@ import numpy as np
 from itertools import product
 from abc import abstractmethod
 import pandas as pd
+import torch
+from pgmpy.models import BayesianNetwork
+from pgmpy.factors.discrete import TabularCPD
+from pgmpy.inference import VariableElimination
+
 class BaseGenerator:
     def __init__(self, config):
         self.config = config
@@ -17,10 +22,18 @@ class BaseGenerator:
     def save(self, N, path):
         X = self.sample_joint(N)
         pd.DataFrame(X).to_csv(path, index =  False)
+    @property
+    def num_samples(self):
+        return np.inf
+    
+    @abstractmethod
+    def estimate_conditional_prob(self, X, I, S):
+        pass
 
 class DataFromFile(BaseGenerator):
     def __init__(self, config):
         super().__init__(config)
+        self.path = config.source.path
         if config.source.path.endswith('.csv'):
             self.samples = pd.read_csv(config.source.path).values
         elif config.source.path.endswith('.npy'):
@@ -31,7 +44,27 @@ class DataFromFile(BaseGenerator):
     def sample_joint(self, N):
         idx = np.random.choice(len(self.samples), N)
         return self.samples[idx]
-
+    @property
+    def num_samples(self):
+        return len(self.samples)
+    
+    
+    def estimate_conditional_prob(self, X, I, S):
+        if self.config.type == DataType.binary:
+            p = torch.zeros(S.shape[0], device = X.device)
+            samples = torch.tensor(self.samples, device = X.device, dtype=torch.float)
+            S = S.bool()
+            I = I.bool()
+            for i in range(S.shape[0]):
+                Ssamples = (samples[:, S[i]] == X[i, S[i]]).all(dim = 1)
+                if Ssamples.sum() == 0:
+                    p[i] = 0.5
+                else:
+                    p[i] = (samples[Ssamples, I[i]] == X[i, I[i]]).float().mean() 
+            return p
+        else:
+            raise NotImplementedError('Continuous data is not supported yet')
+    
 class DataFromDistribution(BaseGenerator):
     def __init__(self, config):
         super().__init__(config)
@@ -43,12 +76,62 @@ class DataFromDistribution(BaseGenerator):
             return np.random.uniform(size=(N, self.n_features))
         else:
             raise ValueError(f'Unknown distribution type: {self.distribution}')
-
+    
 class DataFromDAG(BaseGenerator):
     def __init__(self,  config):
         self.n_features = config.n_features
+        self.max_parents = config.source.max_parents
         self.G = self.create_random_dag(config.source.edge_probability)
         self.assign_cpt(self.G)
+        self._cp_cache = {}
+        self.bn = self.networkx_to_pgmpy()
+        self.infer = VariableElimination(self.bn)
+
+    def networkx_to_pgmpy(self):
+        G = self.G
+        """
+        Convert a NetworkX DiGraph with CPTs to a pgmpy BayesianNetwork.
+        
+        :param G: NetworkX DiGraph with 'cpt' and 'parents' attributes for each node
+        :return: pgmpy BayesianNetwork
+        """
+        # Create a pgmpy BayesianNetwork with the same structure
+        node_mapping = {node: str(node) for node in G.nodes()}
+        edges = [(node_mapping[u], node_mapping[v]) for u, v in G.edges()]
+
+        bn = BayesianNetwork(edges)
+        for node in G.nodes():
+            bn.add_node(node_mapping[node])
+        for node in G.nodes():
+            parents = [node_mapping[p] for p in G.nodes[node]['parents']]
+            cpt = G.nodes[node]['cpt']
+            
+            # Determine the number of parent configurations
+            n_parent_configs = 2**len(parents) if parents else 1
+            
+            # Reshape the CPT to match pgmpy's expected format
+            # perm_order = (len(parents),) + tuple(range(len(parents)))
+            # cpt.transpose(perm_order).reshape(2, n_parent_configs)
+            # print(perm_order, n_parent_configs)
+            reshaped_cpt = cpt.reshape((n_parent_configs, 2)).transpose(1, 0)
+            # reshaped_cpt = cpt.reshape((2, n_parent_configs)).transpose(perm_order)
+            
+            # Create a TabularCPD object
+            cpd = TabularCPD(
+                variable=node_mapping[node],
+                variable_card=2,
+                values=reshaped_cpt,
+                evidence=parents,
+                evidence_card=[2] * len(parents)
+            )
+            
+            # Add the CPD to the BayesianNetwork
+            bn.add_cpds(cpd)
+        
+        # Check if the model is valid
+        assert bn.check_model()
+
+        return bn
 
     def create_random_dag(self, edge_probability=0.3):
         """Create a random directed acyclic graph (DAG)."""
@@ -56,10 +139,14 @@ class DataFromDAG(BaseGenerator):
         G.add_nodes_from(range(self.n_features))
         
         for i in range(self.n_features):
+            num_edges_i = 0
             for j in range(i+1, self.n_features):
                 if np.random.random() < edge_probability:
                     G.add_edge(i, j)
-        
+                num_edges_i += 1
+                if num_edges_i >= self.max_parents:
+                    break
+    
         return G
 
     def assign_cpt(self, G):
@@ -71,10 +158,100 @@ class DataFromDAG(BaseGenerator):
             # Create CPT
             cpt_shape = [2] * (n_parents + 1)
             cpt = np.random.dirichlet(np.ones(2), size=cpt_shape[:-1]).reshape(cpt_shape)
-            
+            # print(cpt.shape)
+            print(node, cpt.sum(axis = -1), file= open('cpt.txt', 'a'))
+            # exit()
             # Assign CPT to node
             G.nodes[node]['cpt'] = cpt
             G.nodes[node]['parents'] = parents
+    
+    def reset_cp_cache(self):
+        self._cp_cache = {}
+    def _conditional_probability_bn(self, i, S, evidence):
+        evidence = {str(k): v for k, v in evidence.items()}
+        key = (str(i), tuple(evidence.items()))
+        if key not in self._cp_cache:   
+            self._cp_cache[key] =  self.infer.query([str(i)], evidence = evidence)
+        return self._cp_cache[key]
+    
+    def _conditional_probability(self, i, S, evidence):
+        """
+        Calculate P(X_i | X_S) for any arbitrary subset of variables S and node i.
+        
+        :param i: The target node
+        :param S: List of nodes in the conditioning set
+        :param evidence: Dictionary of evidence variables and their values
+        :return: Conditional probability P(X_i | X_S)
+        """
+        if (i, tuple(S), tuple(evidence.items())) in self._cp_cache:
+            return self._cp_cache[(i, tuple(S), tuple(evidence.items()))]
+        
+        G = self.G
+        SunionI = S.union({i})
+        all_relevant_nodes = SunionI
+        rel_nodes = set(all_relevant_nodes)
+        for node in rel_nodes:
+            all_relevant_nodes.update(nx.ancestors(G, node))
+
+        # Create a subgraph with only the relevant nodes
+        subgraph = G.subgraph(all_relevant_nodes)
+
+        # Initialize factor as the CPT of the target node
+        factor = G.nodes[i]['cpt'].copy()
+        variables = [i] + G.nodes[i]['parents']
+
+        # Multiply by CPTs of all other nodes in the subgraph
+        for node in nx.topological_sort(subgraph):
+            if node != i:
+                node_cpt = G.nodes[node]['cpt']
+                node_variables = [node] + G.nodes[node]['parents']
+                factor = self.multiply_factors(factor, node_cpt, variables, node_variables)
+                variables = list(set(variables + node_variables))
+
+        # Marginalize out variables not in S + [i]
+        for var in variables:
+            if var not in SunionI:
+                factor = self.marginalize(factor, variables, var)
+                variables.remove(var)
+
+        # Condition on evidence
+        for var, val in evidence.items():
+            if var in variables:
+                
+                factor = self.condition_factor(factor, variables, var, val)
+                variables.remove(var)
+
+        # Normalize
+        factor = factor / np.sum(factor)
+        self._cp_cache[(i, tuple(S), tuple(evidence.items()))] = factor
+
+        return factor
+    
+    def multiply_factors(self, factor1, factor2, vars1, vars2):
+        """Multiply two factors."""
+        all_vars = list(set(vars1 + vars2))
+        new_shape = [2] * len(all_vars)
+        new_factor = np.zeros(new_shape)
+
+        for config in product([0, 1], repeat=len(all_vars)):
+            idx1 = tuple(config[all_vars.index(v)] for v in vars1)
+            idx2 = tuple(config[all_vars.index(v)] for v in vars2)
+            new_factor[config] = factor1[idx1] * factor2[idx2]
+
+        return new_factor
+
+    def marginalize(self, factor, variables, var_to_remove):
+        """Marginalize out a variable from a factor."""
+        var_index = variables.index(var_to_remove)
+        return np.sum(factor, axis=var_index)
+
+    def condition_factor(self, factor, variables, var, value):
+        """Condition a factor on a variable's value."""
+        var_index = variables.index(var)
+        slices = [slice(None)] * len(variables)
+        slices[var_index] = value
+        
+        return factor[tuple(slices)]
 
     def sample_joint(self, n_samples):
         G = self.G
@@ -95,7 +272,17 @@ class DataFromDAG(BaseGenerator):
                 samples[:, node] = np.random.random(n_samples) < probs
         
         return samples
-
+    def estimate_conditional_prob(self, X, I, S):
+        P = np.zeros(X.shape[0])
+        self.reset_cp_cache()
+        for j in range(X.shape[0]):
+            i = [k for k in range(self.n_features) if I[j, k] == 1][0]
+            s = {k for k in range(self.n_features) if S[j, k] == 1}
+            assert i not in s
+            result = self._conditional_probability_bn(i, s, evidence = {k: X[j, k].cpu().item() for k in s})
+            
+            P[j] = result.values[int(X[j, i].item())]
+        return P
 
 class DataGenerator:
     def __init__(self, config):
@@ -120,8 +307,9 @@ class DataGenerator:
             std = self.config.mask.params.std
             masksize = np.random.normal(mean, std, size = (N,))
         elif self.config.mask.distribution == MaskDistributionType.uniform:
-            minms = int(self.config.mask.params.min * self.n_features)
-            maxms = int(self.config.mask.params.max * self.n_features)
+            assert self.config.mask.params.min >= 0 and self.config.mask.params.max <= 1 and self.config.mask.params.min < self.config.mask.params.max
+            minms = max(int(self.config.mask.params.min * self.n_features), 1)
+            maxms = int(self.config.mask.params.max * self.n_features) + 1
             masksize = np.random.uniform(minms, maxms, size = (N,))
         elif self.config.mask.distribution == MaskDistributionType.delta:
             masksize = np.ones(N) * self.config.mask.params.value
@@ -144,24 +332,51 @@ class DataGenerator:
             std = self.config.data.mask.params.std
             masksize = np.random.normal(mean, std, size = (N,))
         elif self.config.data.mask.distribution == MaskDistributionType.uniform:
-            masksize = np.random.uniform(self.config.data.mask.params.min, self.config.data.mask.params.max, size = (N,))
+            minms = max(int(self.config.mask.params.min * self.n_features) - 1, 0)
+            maxms = min(int(self.config.mask.params.max * self.n_features), self.n_features)
+            masksize = np.random.uniform(minms, maxms, size = (N,))
         elif self.config.data.mask.distribution == MaskDistributionType.delta:
             masksize = np.ones(N) * self.config.data.mask.params.value
         for i in range(N):
-            masksize = np.clip(masksize, 1, self.n_features)
+            masksize = np.clip(masksize, 0, self.n_features - 1)
             indices = np.random.choice(np.arange(self.n_features), int(masksize[i]), replace=False)
             S[i, indices] = 1
         return X, S
 
+    def estimate_prob(self, X, S, N):
+        P = np.zeros(X.shape[0], self.n_features)
+        Xj = self.sampler.sample_joint(N)
+        if self.config.type == DataType.binary:
+            for i in range(X.shape[0]):
+                s = S[i] 
+                indices = (Xj[:, s] == X[i, s]).all(dim = 1)
+                if indices.sum() == 0:
+                    P[i] = 0.5
+                else:
+                    P[i] = Xj[indices].mean().cpu().numpy()
+        return P
 
 if __name__ == '__main__':
     from omegaconf import OmegaConf as om
     from argparse import ArgumentParser
     parser = ArgumentParser()
-    parser.add_argument('--config', type = str, default='config_data.yaml')
-    parser.add_argument('--n_samples', type = int, default=1000)
+    # parser.add_argument('--config', type = str, default='config_data.yaml')
+    parser.add_argument('--n_samples', type = int, default=10000)
     parser.add_argument('--path', type = str, default='data.csv')
+    parser.add_argument('--nf', type = int, default=10)
+    parser.add_argument('--ep', type = float, default=0.2)
+    parser.add_argument('--configs', type = str, default='datasets/info.csv')
+    parser.add_argument('--multiple', action='store_true', default=False)
     args = parser.parse_args()
-    config = om.load(args.config)
-    data_generator = DataGenerator(config)
-    data_generator.sampler.save(args.n_samples, args.path)
+    # config = om.load(args.config)
+    if args.multiple:
+        configs = pd.read_csv(args.configs)
+        for i in range(len(configs)):
+            config = configs.iloc[i]
+            data_generator = DataGenerator(om.create({'n_features': int(config['n_features']), 'source': {'type': 'dag', 'edge_probability': float(config['edge_probability'])}}))
+            data_generator.sampler.save(args.n_samples, 'datasets/'+config['path'])
+    else:
+        config = om.create({'n_features': args.nf, 'source': {'type': 'dag', 'edge_probability': args.ep}})
+        data_generator = DataGenerator(config)
+        args.path = 'datasets/' + args.path
+        data_generator.sampler.save(args.n_samples, args.path)

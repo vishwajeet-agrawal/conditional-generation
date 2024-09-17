@@ -23,3 +23,4 @@ class ContextAggregator(StrEnum):
     avg = 'avg'
     linear = 'linear'
     attention = 'attention' 
+    transformer = 'transformer'

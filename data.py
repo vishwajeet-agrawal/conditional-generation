@@ -167,92 +167,13 @@ class DataFromDAG(BaseGenerator):
     
     def reset_cp_cache(self):
         self._cp_cache = {}
-    def _conditional_probability_bn(self, i, S, evidence):
+    def _conditional_probability(self, i, S, evidence):
         evidence = {str(k): v for k, v in evidence.items()}
         key = (str(i), tuple(evidence.items()))
         if key not in self._cp_cache:   
             self._cp_cache[key] =  self.infer.query([str(i)], evidence = evidence)
         return self._cp_cache[key]
     
-    def _conditional_probability(self, i, S, evidence):
-        """
-        Calculate P(X_i | X_S) for any arbitrary subset of variables S and node i.
-        
-        :param i: The target node
-        :param S: List of nodes in the conditioning set
-        :param evidence: Dictionary of evidence variables and their values
-        :return: Conditional probability P(X_i | X_S)
-        """
-        if (i, tuple(S), tuple(evidence.items())) in self._cp_cache:
-            return self._cp_cache[(i, tuple(S), tuple(evidence.items()))]
-        
-        G = self.G
-        SunionI = S.union({i})
-        all_relevant_nodes = SunionI
-        rel_nodes = set(all_relevant_nodes)
-        for node in rel_nodes:
-            all_relevant_nodes.update(nx.ancestors(G, node))
-
-        # Create a subgraph with only the relevant nodes
-        subgraph = G.subgraph(all_relevant_nodes)
-
-        # Initialize factor as the CPT of the target node
-        factor = G.nodes[i]['cpt'].copy()
-        variables = [i] + G.nodes[i]['parents']
-
-        # Multiply by CPTs of all other nodes in the subgraph
-        for node in nx.topological_sort(subgraph):
-            if node != i:
-                node_cpt = G.nodes[node]['cpt']
-                node_variables = [node] + G.nodes[node]['parents']
-                factor = self.multiply_factors(factor, node_cpt, variables, node_variables)
-                variables = list(set(variables + node_variables))
-
-        # Marginalize out variables not in S + [i]
-        for var in variables:
-            if var not in SunionI:
-                factor = self.marginalize(factor, variables, var)
-                variables.remove(var)
-
-        # Condition on evidence
-        for var, val in evidence.items():
-            if var in variables:
-                
-                factor = self.condition_factor(factor, variables, var, val)
-                variables.remove(var)
-
-        # Normalize
-        factor = factor / np.sum(factor)
-        self._cp_cache[(i, tuple(S), tuple(evidence.items()))] = factor
-
-        return factor
-    
-    def multiply_factors(self, factor1, factor2, vars1, vars2):
-        """Multiply two factors."""
-        all_vars = list(set(vars1 + vars2))
-        new_shape = [2] * len(all_vars)
-        new_factor = np.zeros(new_shape)
-
-        for config in product([0, 1], repeat=len(all_vars)):
-            idx1 = tuple(config[all_vars.index(v)] for v in vars1)
-            idx2 = tuple(config[all_vars.index(v)] for v in vars2)
-            new_factor[config] = factor1[idx1] * factor2[idx2]
-
-        return new_factor
-
-    def marginalize(self, factor, variables, var_to_remove):
-        """Marginalize out a variable from a factor."""
-        var_index = variables.index(var_to_remove)
-        return np.sum(factor, axis=var_index)
-
-    def condition_factor(self, factor, variables, var, value):
-        """Condition a factor on a variable's value."""
-        var_index = variables.index(var)
-        slices = [slice(None)] * len(variables)
-        slices[var_index] = value
-        
-        return factor[tuple(slices)]
-
     def sample_joint(self, n_samples):
         G = self.G
         """Generate samples from the Bayesian Network."""
@@ -279,7 +200,7 @@ class DataFromDAG(BaseGenerator):
             i = [k for k in range(self.n_features) if I[j, k] == 1][0]
             s = {k for k in range(self.n_features) if S[j, k] == 1}
             assert i not in s
-            result = self._conditional_probability_bn(i, s, evidence = {k: X[j, k].cpu().item() for k in s})
+            result = self._conditional_probability(i, s, evidence = {k: X[j, k].cpu().item() for k in s})
             
             P[j] = result.values[int(X[j, i].item())]
         return P

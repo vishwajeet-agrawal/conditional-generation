@@ -12,9 +12,12 @@ class StrEnum(str, Enum):
         return f"'{str(self)}'"
     
 import torch
-def get_attn_mask(S, device):
-    N = S.size(0)
-    n = S.size(1)
-    attn_mask = (1 - (S.unsqueeze(1) * S.unsqueeze(2))).to(torch.bool)
-    attn_mask = torch.zeros_like(attn_mask, dtype=torch.float).masked_fill_(attn_mask, float("-inf"))
-    return attn_mask
+def stable_softmax(X):
+    all_neg_inf = torch.all(X == float("-inf"), dim = -1)
+    max_ = torch.max(X, dim = -1)[0]
+    max_score = torch.where(all_neg_inf, 0, max_)
+    exp_scores = torch.exp(X - max_score.unsqueeze(-1))
+    sum_scores = exp_scores.sum(dim = -1, keepdim=True)
+    sum_scores = torch.where(sum_scores == 0, 1, sum_scores)
+    return exp_scores / sum_scores
+

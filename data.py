@@ -21,12 +21,12 @@ class BaseGenerator:
 class DataFromFile(BaseGenerator):
     def __init__(self, config):
         super().__init__(config)
-        if config.path.endswith('.csv'):
+        if config.source.path.endswith('.csv'):
             self.samples = pd.read_csv(config.source.path).values
-        elif config.path.endswith('.npy'):
+        elif config.source.path.endswith('.npy'):
             self.samples = np.load(config.source.path)
         else:
-            raise ValueError(f'Unknown file type: {config.path.split(".")[-1]}')
+            raise ValueError(f'Unknown file type: {config.source.path.split(".")[-1]}')
         
     def sample_joint(self, N):
         idx = np.random.choice(len(self.samples), N)
@@ -47,7 +47,7 @@ class DataFromDistribution(BaseGenerator):
 class DataFromDAG(BaseGenerator):
     def __init__(self,  config):
         self.n_features = config.n_features
-        self.G = self.create_random_dag(config.edge_probability)
+        self.G = self.create_random_dag(config.source.edge_probability)
         self.assign_cpt(self.G)
 
     def create_random_dag(self, edge_probability=0.3):
@@ -112,26 +112,28 @@ class DataGenerator:
     def sample_conditional(self, N):  
         X = self.sampler.sample_joint(N)
         S = np.zeros((N, self.n_features))
+        
         Xi = np.zeros(N)
         Ii = np.zeros(N)
-        if self.config.data.mask.distribution == MaskDistributionType.truncnorm:
-            mean = self.config.data.mask.params.mean
-            std = self.config.data.mask.params.std
+        if self.config.mask.distribution == MaskDistributionType.truncnorm:
+            mean = self.config.mask.params.mean
+            std = self.config.mask.params.std
             masksize = np.random.normal(mean, std, size = (N,))
-        elif self.config.data.mask.distribution == MaskDistributionType.uniform:
-            minms = int(self.config.data.mask.params.min * self.n_features)
-            maxms = int(self.config.data.mask.params.max * self.n_features)
+        elif self.config.mask.distribution == MaskDistributionType.uniform:
+            minms = int(self.config.mask.params.min * self.n_features)
+            maxms = int(self.config.mask.params.max * self.n_features)
             masksize = np.random.uniform(minms, maxms, size = (N,))
-        elif self.config.data.mask.distribution == MaskDistributionType.delta:
-            masksize = np.ones(N) * self.config.data.mask.params.value
+        elif self.config.mask.distribution == MaskDistributionType.delta:
+            masksize = np.ones(N) * self.config.mask.params.value
+        masksize = np.clip(masksize, 1, self.n_features)
         for i in range(N):
-            masksize = np.clip(masksize, 1, self.n_features)
             indices = np.random.choice(np.arange(self.n_features), int(masksize[i]), replace=False)
             index_i = indices[0]
             indices_s = indices[1:]
             S[i, indices_s] = 1
             Xi[i] = X[i, index_i]
             Ii[i] = index_i
+        Ii = np.eye(self.n_features)[Ii.astype(int)]
         return X, Xi, Ii, S
     
     def sample_marginal(self, N):
@@ -157,8 +159,9 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser()
     parser.add_argument('--config', type = str, default='config_data.yaml')
+    parser.add_argument('--n_samples', type = int, default=1000)
     parser.add_argument('--path', type = str, default='data.csv')
     args = parser.parse_args()
     config = om.load(args.config)
     data_generator = DataGenerator(config)
-    data_generator.sampler.save(config.n_samples, args.path)
+    data_generator.sampler.save(args.n_samples, args.path)

@@ -10,16 +10,18 @@ def get_attn_mask(S, device):
     attn_mask = torch.zeros_like(attn_mask, dtype=torch.float).masked_fill_(attn_mask, float("-inf"))
     return attn_mask
 
-def np_to_device(X, device):
+def np_to_torch(X, device, dtype =  torch.float32):
     device = torch.device(device)
-    return torch.from_numpy(X).to(device)
+    return torch.from_numpy(X).to(device).type(dtype)
+    
 
 class Trainer:
-    def __init__(self, model, data_generator, config):
+    def __init__(self, model, data_generator, config, args):
         self.model = model
         self.optimizer = torch.optim.Adam(model.parameters(), lr = config.lr)
         self.config = config
         self.data_generator = data_generator
+        self.args = args
 
     def train_step(self, X, Xi, I, S):
         self.optimizer.zero_grad()
@@ -30,11 +32,12 @@ class Trainer:
     
     def get_batch(self, n_samples):
         X, Xi, I, S = self.data_generator.sample_conditional(n_samples)
-        X = np_to_device(X, self.config.device)
-        Xi = np_to_device(Xi, self.config.device)
-        I = np_to_device(I, self.config.device)
-        S = np_to_device(S, self.config.device)
+        X = np_to_torch(X, self.config.device)
+        Xi = np_to_torch(Xi, self.config.device)
+        I = np_to_torch(I, self.config.device)
+        S = np_to_torch(S, self.config.device)
         return X, Xi, I, S
+    
     def get_mini_batch(self, X, Xi, I, S):
         N = X.size(0)
         batch_num = N // self.config.batch_size
@@ -44,16 +47,13 @@ class Trainer:
             yield X[start:end], Xi[start:end], I[start:end], S[start:end]
 
     def train(self):
-        X, Xi, I, S = self.get_batch(config.n_samples)
-        for i in range(config.n_epochs):
-            loss = 0
-            for mini_batch in self.get_mini_batch(X, Xi, I, S):
-                Xb, Xib, Ib, Sb = mini_batch
-                mb_loss = self.train_step(Xb, Xib, Ib, Sb)
-                loss += mb_loss
-            loss = loss / (config.n_samples // self.config.batch_size)
-            if i % 2 == 0:
-                print(f'Epoch {i}: Loss = {loss}')
+        X, Xi, I, S = self.get_batch(self.config.load_factor * self.config.batch_size)
+        for i in range(self.config.n_steps//self.config.load_factor):
+            mini_batch = self.get_mini_batch(X, Xi, I, S)
+            for j, (Xb, Xib, Ib, Sb) in enumerate(mini_batch):
+                loss = self.train_step(Xb, Xib, Ib, Sb)
+                if self.args.debug and (i*self.config.load_factor + j) % self.config.debug.print_interval == 0:
+                    print(f'Step {i*self.config.load_factor + j}: Loss = {loss}')
         torch.save(self.model.state_dict(), self.config.model_path)
         
 if __name__ == '__main__':
@@ -64,10 +64,12 @@ if __name__ == '__main__':
 
     parser = ArgumentParser()
     parser.add_argument('--config', type = str, default='config.yaml')
+    parser.add_argument('--debug', action='store_true', default=False)
     args = parser.parse_args()
     config = om.load(args.config)
-    model = Model(config.model)
+    model = Model(config.model, args).to(config.train.device)
     data_generator = DataGenerator(config.data)
-    trainer = Trainer(model, data_generator, config.train)
+    trainer = Trainer(model, data_generator, config.train, args)
 
     trainer.train()
+

@@ -20,6 +20,6 @@ class DataType(StrEnum):
 
 class ContextAggregator(StrEnum):
     sum = 'sum'
-    avg = 'average'
+    avg = 'avg'
     linear = 'linear'
     attention = 'attention' 

@@ -5,6 +5,7 @@ import networkx as nx
 import numpy as np
 from itertools import product
 from abc import abstractmethod
+import pandas as pd
 class BaseGenerator:
     def __init__(self, config):
         self.config = config
@@ -12,11 +13,21 @@ class BaseGenerator:
     @abstractmethod
     def sample_joint(self, N):
         pass
+    @abstractmethod 
+    def save(self, N, path):
+        X = self.sample_joint(N)
+        pd.DataFrame(X).to_csv(path, index =  False)
 
 class DataFromFile(BaseGenerator):
     def __init__(self, config):
         super().__init__(config)
-        self.samples = np.load(config.source.path)
+        if config.path.endswith('.csv'):
+            self.samples = pd.read_csv(config.source.path).values
+        elif config.path.endswith('.npy'):
+            self.samples = np.load(config.source.path)
+        else:
+            raise ValueError(f'Unknown file type: {config.path.split(".")[-1]}')
+        
     def sample_joint(self, N):
         idx = np.random.choice(len(self.samples), N)
         return self.samples[idx]
@@ -139,3 +150,15 @@ class DataGenerator:
             indices = np.random.choice(np.arange(self.n_features), int(masksize[i]), replace=False)
             S[i, indices] = 1
         return X, S
+
+
+if __name__ == '__main__':
+    from omegaconf import OmegaConf as om
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument('--config', type = str, default='config_data.yaml')
+    parser.add_argument('--path', type = str, default='data.csv')
+    args = parser.parse_args()
+    config = om.load(args.config)
+    data_generator = DataGenerator(config)
+    data_generator.sampler.save(config.n_samples, args.path)

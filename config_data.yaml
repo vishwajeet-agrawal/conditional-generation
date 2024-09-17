@@ -1,5 +1,0 @@
-type: 'discrete'
-n_features: 10
-source: 
-  type: 'dag'
-  edge_probability: 0.2

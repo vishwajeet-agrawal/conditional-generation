@@ -15,32 +15,45 @@ def np_to_device(X, device):
     return torch.from_numpy(X).to(device)
 
 class Trainer:
-    def __init__(self, model, config):
+    def __init__(self, model, data_generator, config):
         self.model = model
         self.optimizer = torch.optim.Adam(model.parameters(), lr = config.lr)
         self.config = config
-        
+        self.data_generator = data_generator
 
-    def train_step(self, X, Xi, I, S, attn_mask):
+    def train_step(self, X, Xi, I, S):
         self.optimizer.zero_grad()
-        loss = - self.model.logprob(X, Xi, I, S, attn_mask).mean()
+        loss = - self.model.logprob(X, Xi, I, S).mean()
         loss.backward()
         self.optimizer.step()
         return loss.item()
     
-
-    def train(self, data_generator, n_steps, n_samples):
-        X, Xi, I, S = data_generator.sample_conditional(n_samples)
+    def get_batch(self, n_samples):
+        X, Xi, I, S = self.data_generator.sample_conditional(n_samples)
         X = np_to_device(X, self.config.device)
         Xi = np_to_device(Xi, self.config.device)
         I = np_to_device(I, self.config.device)
         S = np_to_device(S, self.config.device)
+        return X, Xi, I, S
+    def get_mini_batch(self, X, Xi, I, S):
+        N = X.size(0)
+        batch_num = N // self.config.batch_size
+        for i in range(batch_num):
+            start = i * self.config.batch_size
+            end = (i + 1) * self.config.batch_size
+            yield X[start:end], Xi[start:end], I[start:end], S[start:end]
 
-        attn_mask = get_attn_mask(S)
-        for i in range(n_steps):
-            loss = self.train_step(X, Xi, I, S, attn_mask)
-            if i % 100 == 0:
-                print(f'Step {i}: Loss = {loss}')
+    def train(self):
+        X, Xi, I, S = self.get_batch(config.n_samples)
+        for i in range(config.n_epochs):
+            loss = 0
+            for mini_batch in self.get_mini_batch(X, Xi, I, S):
+                Xb, Xib, Ib, Sb = mini_batch
+                mb_loss = self.train_step(Xb, Xib, Ib, Sb)
+                loss += mb_loss
+            loss = loss / (config.n_samples // self.config.batch_size)
+            if i % 2 == 0:
+                print(f'Epoch {i}: Loss = {loss}')
         torch.save(self.model.state_dict(), self.config.model_path)
         
 if __name__ == '__main__':
@@ -55,6 +68,6 @@ if __name__ == '__main__':
     config = om.load(args.config)
     model = Model(config.model)
     data_generator = DataGenerator(config.data)
-    trainer = Trainer(model, config.train)
+    trainer = Trainer(model, data_generator, config.train)
 
-    trainer.train(data_generator, config.train.n_steps, config.train.n_samples)
+    trainer.train()

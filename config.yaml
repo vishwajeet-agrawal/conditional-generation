@@ -1,11 +1,10 @@
 data:
-  type: 'continuous'
-  n_features: 20
+  type: 'discrete'
+  n_features: 50
   source: 
-    type: 'distribution'
-    distribution: 'normal'
+    type: 'dag'
+    edge_probability: 0.2
   mask:
-    type: 'distribution'
     distribution: 'uniform'
     params:
       min: 0.1
@@ -13,15 +12,14 @@ data:
     
 model:
   data_type: '${data.type}'
+  embedding_dim: 100
   score_function:  'exp'
   context_aggregator: 'avg'
-  marginal: 
-    mean: 0
-    std: 1
-
+  
 train:
   lr: 0.001
   model_path: 'models/model.pth'
   device: 'cpu'
   n_steps: 100
-  n_samples: 1000
+  n_samples: 51200
+  batch_size: 512

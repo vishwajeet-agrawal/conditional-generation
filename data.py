@@ -1,30 +1,105 @@
 import numpy as np
 from omegaconf import OmegaConf as om
-from config import SourceType, JointDistributionType, MaskDistributionType
+from config import SourceType, JointDistributionType, MaskDistributionType, DataType
+import networkx as nx
+import numpy as np
+from itertools import product
+from abc import abstractmethod
+class BaseGenerator:
+    def __init__(self, config):
+        self.config = config
+        self.n_features = config.n_features
+    @abstractmethod
+    def sample_joint(self, N):
+        pass
+
+class DataFromFile(BaseGenerator):
+    def __init__(self, config):
+        super().__init__(config)
+        self.samples = np.load(config.source.path)
+    def sample_joint(self, N):
+        idx = np.random.choice(len(self.samples), N)
+        return self.samples[idx]
+
+class DataFromDistribution(BaseGenerator):
+    def __init__(self, config):
+        super().__init__(config)
+        self.distribution = config.source.distribution
+    def sample_joint(self, N):
+        if self.distribution == JointDistributionType.normal:
+            return np.random.normal(size=(N, self.n_features))
+        elif self.distribution == JointDistributionType.normal:
+            return np.random.uniform(size=(N, self.n_features))
+        else:
+            raise ValueError(f'Unknown distribution type: {self.distribution}')
+
+class DataFromDAG(BaseGenerator):
+    def __init__(self,  config):
+        self.n_features = config.n_features
+        self.G = self.create_random_dag(config.edge_probability)
+        self.assign_cpt(self.G)
+
+    def create_random_dag(self, edge_probability=0.3):
+        """Create a random directed acyclic graph (DAG)."""
+        G = nx.DiGraph()
+        G.add_nodes_from(range(self.n_features))
+        
+        for i in range(self.n_features):
+            for j in range(i+1, self.n_features):
+                if np.random.random() < edge_probability:
+                    G.add_edge(i, j)
+        
+        return G
+
+    def assign_cpt(self, G):
+        """Assign conditional probability tables (CPTs) to each node."""
+        for node in G.nodes():
+            parents = list(G.predecessors(node))
+            n_parents = len(parents)
+            
+            # Create CPT
+            cpt_shape = [2] * (n_parents + 1)
+            cpt = np.random.dirichlet(np.ones(2), size=cpt_shape[:-1]).reshape(cpt_shape)
+            
+            # Assign CPT to node
+            G.nodes[node]['cpt'] = cpt
+            G.nodes[node]['parents'] = parents
+
+    def sample_joint(self, n_samples):
+        G = self.G
+        """Generate samples from the Bayesian Network."""
+        samples = np.zeros((n_samples, len(G.nodes)), dtype=int)
+        
+        for node in nx.topological_sort(G):
+            parents = G.nodes[node]['parents']
+            cpt = G.nodes[node]['cpt']
+            
+            if not parents:
+                prob = cpt[1]
+                samples[:, node] = np.random.random(n_samples) < prob
+            else:
+                parent_values = samples[:, parents]
+                parent_configs = [tuple(row) for row in parent_values]
+                probs = np.array([cpt[config + (1,)] for config in parent_configs])
+                samples[:, node] = np.random.random(n_samples) < probs
+        
+        return samples
+
+
 class DataGenerator:
     def __init__(self, config):
         self.config = config
-        self.n_features = self.config.get('n_features')
+        self.n_features = self.config.n_features
         if self.config.source.type == SourceType.samples:
-            self.samples = np.load(self.config.source.path)
+            self.sampler = DataFromFile(self.config)
+        elif self.config.source.type == SourceType.distribution:
+            self.sampler = DataFromDistribution(self.config)
+        elif self.config.source.type == SourceType.dag:
+            self.sampler = DataFromDAG(self.config)
         else:
-            self.samples = None
-    def sample_joint(self, N):
-        if self.config.data.source.type == SourceType.samples:
-            idx = np.random.choice(len(self.samples), N)
-            return self.samples[idx]            
-        elif self.config.data.source.type == SourceType.distribution:
-            if self.config.data.source.distribution == JointDistributionType.normal:
-                return np.random.normal(size=(N, self.n_features))
-            elif self.config.data.source.distribution == JointDistributionType.uniform:
-                return np.random.uniform(size=(N, self.n_features))
-            else:
-                raise ValueError(f'Unknown distribution type: {self.config.data.source.distribution}')
-        else:
-            raise ValueError(f'Unknown data source type: {self.config.data.source.type}')
-    
+            raise ValueError(f'Unknown source type: {self.config.source.type}')
     def sample_conditional(self, N):  
-        X = self.sample_joint(N)
+        X = self.sampler.sample_joint(N)
         S = np.zeros((N, self.n_features))
         Xi = np.zeros(N)
         Ii = np.zeros(N)

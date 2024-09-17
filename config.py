@@ -2,6 +2,8 @@ from util import StrEnum
 class SourceType(StrEnum):
     samples = 'samples'
     distribution = 'distribution'
+    dag = 'dag'
+    
 class JointDistributionType(StrEnum):
     normal = 'normal'
     uniform = 'uniform'

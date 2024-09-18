@@ -1,5 +1,7 @@
 Our model is given as
-$$P(X_i | X_S) \propto \exp(\phi_i(X_i)^T \psi_{i, S}(X_S))$$
+$$\begin{equation}
+P(X_i | X_S) \propto \exp(\phi_i(X_i)^T \psi_{i, S}(X_S))
+\end{equation}$$
 
 We first experiment for the binary variable case when $X \in \{0, 1\}^n$.
 
@@ -7,7 +9,9 @@ Then we define learnable embedding $\phi_i(X_i) = z_{i,v} \in \mathbb{R}^d$ with
 
 We define $\psi_{i, S}(X_S)$ as
 
-$$\psi_{i, S}(X_S) = aggregate(\{(i, j, \phi'(X_j))\}_{j\in S})$$
+$$\begin{equation}
+\psi_{i, S}(X_S) = aggregate(\{(i, j, \phi'(X_j))\}_{j\in S})
+\end{equation}$$
 
 or letting $i, j$ represented as a vectors $b_i, b_j \in \mathbb{R}^d$ and $\psi'(X_j)$ as $z_{j, v}$ for $v = X_j$.
 
@@ -15,15 +19,18 @@ Ways to implement $aggregate$ function
 
 #### Average
 
-$$\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S} (b_j + b_i + z_{j,X_j}) $$
+$$\begin{equation}
+\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S} (b_j + b_i + z_{j,X_j})
+\end{equation}$$
 
 #### Attention
 
-$$w'_{jk} = (b_j + b_i + z_{j, X_j})^T(b_k+b_i+z_{k, X_k})$$
+$$\begin{align}
+w'_{jk} &= (b_j + b_i + z_{j, X_j})^T(b_k+b_i+z_{k, X_k})\\
+w_{jk} &= \exp(w'_{jk}/\sqrt{d})/\sum_{k\in S}\exp(w'_{jk}/\sqrt{d})\\
+\psi_{i, S}(X_S) &= 1/|S|\sum_{j\in S}\sum_{k\in S} w_{jk}(b_k + b_i + z_{k, X_k})
+\end{align}$$
 
-$$w_{jk} = \exp(w'_{jk}/\sqrt{d})/\sum_{k\in S}\exp(w'_{jk}/\sqrt{d})$$
-
-$$\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S}\sum_{k\in S} w_{jk}(b_k + b_i + z_{k, X_k})$$
 
 
 #### Next Steps

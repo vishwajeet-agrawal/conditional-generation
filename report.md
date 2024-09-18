@@ -6,7 +6,9 @@ We first experiment for the binary variable case when $X \in \{0, 1\}^n$.
 Then we define learnable embedding $\phi_i(X_i) = z_{i,v} \in \mathbb{R}^d$ with $v = X_i$ for each $i \in [n]$ and $X_i \in \{0, 1\}$, and $d$ is the embedding dimension.
 
 We define $\psi_{i, S}(X_S)$ as
+
 $$aggregate(\{(i, j, \phi'(X_j))\}_{j\in S})$$
+
 or letting $i, j$ represented as a vectors $b_i, b_j \in \mathbb{R}^d$ and $\psi'(X_j)$ as $z_{j, v}$ for $v = X_j$.
 
 Ways to implement $aggregate$ function

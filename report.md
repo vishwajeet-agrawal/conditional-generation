@@ -11,16 +11,18 @@ or letting $i, j$ represented as a vectors $b_i, b_j \in \mathbb{R}^d$ and $\psi
 
 Ways to implement $aggregate$ function
 
-> Average
+#### Average
+
 $$\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S} (b_j + b_i + z_{j,X_j}) $$
->Attention
+
+#### Attention
 
 $$w'_{jk} = (b_j + b_i + z_{j, X_j})^T(b_k+b_i+z_{k, X_k})$$
 $$w_{jk} = \exp(w'_{jk}/\sqrt{d})/\sum_{k\in S}\exp(w'_{jk}/\sqrt{d})$$
 $$\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S}\sum_{k\in S} w_{jk}(b_k + b_i + z_{k, X_k})$$
 
 
-> Next Steps
+#### Next Steps
 
 Multiple rounds of message passing, either through attention or MLP.
 

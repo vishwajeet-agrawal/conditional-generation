@@ -1,4 +1,5 @@
 Our model is given as
+
 $$\begin{equation}
 P(X_i | X_S) \propto \exp(\phi_i(X_i)^T \psi_{i, S}(X_S))
 \end{equation}$$

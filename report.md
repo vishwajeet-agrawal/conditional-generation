@@ -7,7 +7,7 @@ Then we define learnable embedding $\phi_i(X_i) = z_{i,v} \in \mathbb{R}^d$ with
 
 We define $\psi_{i, S}(X_S)$ as
 
-$$aggregate(\{(i, j, \phi'(X_j))\}_{j\in S})$$
+$$\psi_{i, S}(X_S) = aggregate(\{(i, j, \phi'(X_j))\}_{j\in S})$$
 
 or letting $i, j$ represented as a vectors $b_i, b_j \in \mathbb{R}^d$ and $\psi'(X_j)$ as $z_{j, v}$ for $v = X_j$.
 
@@ -20,7 +20,9 @@ $$\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S} (b_j + b_i + z_{j,X_j}) $$
 #### Attention
 
 $$w'_{jk} = (b_j + b_i + z_{j, X_j})^T(b_k+b_i+z_{k, X_k})$$
+
 $$w_{jk} = \exp(w'_{jk}/\sqrt{d})/\sum_{k\in S}\exp(w'_{jk}/\sqrt{d})$$
+
 $$\psi_{i, S}(X_S) = 1/|S|\sum_{j\in S}\sum_{k\in S} w_{jk}(b_k + b_i + z_{k, X_k})$$
 
 

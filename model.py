@@ -1,19 +1,135 @@
 import torch
 import torch.nn as nn
 import yaml
+from abc import abstractmethod
 from omegaconf import OmegaConf as om
 from config import ScoreFunctionType, ContextAggregator, DataType
 import numpy as np
 from torch.nn import functional as F
 from torch.distributions import Normal
 from util import stable_softmax
+import math
 class TransformerEncoder(nn.Module):
     def __init__(self, config):
         super(TransformerEncoder, self).__init__()
         self.transformer = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=config.embedding_dim, nhead=config.attention_nheads), num_layers=config.attention_nlayers)
     def forward(self, X, attn_mask):
         return self.transformer(X, attn_mask)
+
+class FFN(nn.Module):
+    # Also implement layer normalization
+    def __init__(self, embedding_dim):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, embedding_dim)
+        )
+    def forward(self, X):
+        return X + self.mlp(X)
+      
+class ContextAggregator(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.embedding_dim = config.embedding_dim
+        self.n_features = config.n_features
+        self.n_vocab = config.n_vocab
+        self.n_layers = config.n_layers
+
+        self.positional_embeddings = nn.Parameter(torch.empty(self.n_features, self.embedding_dim))
+        if not config.tie_embeddings:
+            self.embeddings = nn.ModuleList([nn.Embedding(self.n_vocab + 1, self.embedding_dim) for _ in range(self.n_features)])
+        else:
+            self.embeddings = nn.Embedding(self.n_vocab + 1, self.embedding_dim)
+            self.embeddings = nn.ModuleList([self.embeddings for _ in range(self.n_features)])
+        
+        if config.tie_ffn:
+            self.ffns = FFN(self.embedding_dim)
+            self.ffns = nn.ModuleList([self.ffns for _ in range(config.n_layers)])
+        else:
+            self.ffns = nn.ModuleList([FFN(self.embedding_dim) for _ in range(config.n_layers)])
+
+    def reset_parameters(self):
+        nn.init.xavier_normal_(self.positional_embeddings)
+        
+    def token_to_embeddings(self, X, S):
+        Xm = X * S + (1 - S) * self.n_vocab
+        embeddings = [self.embeddings[i](Xm[:, i]) for i in range(self.n_features)]
+        embeddings = torch.stack(embeddings, dim = 1)
+        return embeddings + self.positional_embeddings.unsqueeze(0)
+        
+    def forward(self, X, I, S):
+        x = self.token_to_embeddings(X, S)
+        for i in range(self.n_layers):
+            x = self.aggregate(x, i, I + S)
+            x = self.ffns[i](x)
+        return torch.bmm(x.transpose(1, 2), I.unsqueeze(-1)).squeeze(-1)
     
+    @abstractmethod
+    def aggregate(self, x, i, mask):
+        return ...
+   
+    
+class MLPAggregator(ContextAggregator):
+    def __init__(self, config):
+        super(MLPAggregator, self).__init__(config)
+        self.tie_aggregate = config.tie_aggregate
+        if self.tie_aggregate:
+            self.aggregator = nn.Parameter(nn.Empty(self.n_features, self.n_features))
+            self.aggregator = nn.ModuleList([self.aggregator for _ in range(config.n_layers)])
+        else:
+            self.aggregator = nn.ModuleList([nn.Parameter(nn.Empty(self.n_features, self.n_features))for _ in range(config.n_layers)])
+    def reset_parameters(self):
+        if self.tie_aggregate:
+            nn.init.xavier_normal_(self.aggregator[0])
+        else:
+            [nn.init.xavier_normal_(self.aggregator[i]) for i in range(self.n_layers)]
+        
+    def aggregate(self, x, i, m):
+        return torch.baddbmm(x, self.aggregator[i].unsqueeze(0) * m.unsqueeze(1), x)
+
+class TransformerAggregator(ContextAggregator):
+    def __init__(self, config):
+        super(TransformerAggregator, self).__init__(config)
+        self.n_heads = config.n_heads
+        if config.tie_qkv:
+            qkv_proj = nn.Parameter(nn.Empty(3 * self.embedding_dim, self.embedding_dim))
+            out_proj = nn.Parameter(nn.Empty(self.embedding_dim, self.embedding_dim))
+            nn.init.xavier_normal_(qkv_proj)
+            nn.init.xavier_normal_(out_proj)
+            self.qkv_proj = nn.ModuleList([qkv_proj for _ in range(self.n_layers)])
+            self.out_proj = nn.ModuleList([out_proj for _ in range(self.n_layers)])
+        else:
+            self.qkv_proj = nn.ModuleList([nn.Parameter(nn.Empty(3 * self.embedding_dim, self.embedding_dim))])
+            self.out_proj = nn.ModuleList([nn.Parameter(nn.Empty(self.embedding_dim, self.embedding_dim))])
+            [nn.init.xavier_normal_(self.qkv_proj[i]) for i in range(self.n_layers)]
+            [nn.init.xavier_normal_(self.out_proj[i]) for i in range(self.n_layers)]
+
+    def get_attn_mask(self, S):
+        attn_mask = (1 - (S.unsqueeze(1) * S.unsqueeze(2))).to(torch.bool)
+        attn_mask = torch.zeros_like(attn_mask, dtype=torch.float).masked_fill_(attn_mask, float("-inf"))
+        return attn_mask
+
+    def aggregate(self, x, i, m):
+        attn_mask = self.get_attn_mask(m)
+        B, T, C = x.size()
+        wq, wk, wv = torch.split(self.qkv_proj[i], 3, dim = 0)
+        q = F.linear(x, wq, 0)
+        k = F.linear(x, wk, 0)
+        v = F.linear(x, wv, 0)
+        d_dim = self.embedding_dim//self.n_heads
+        q = q.view(B, T, self.n_heads, d_dim).transpose(1, 2).view(B * self.n_heads, T, d_dim)
+        k = k.view(B, T, self.n_heads, d_dim).transpose(1, 2).view(B * self.n_heads, T, d_dim)
+        v = v.view(B, T, self.n_heads, d_dim).transpose(1, 2).view(B * self.n_heads, T, d_dim)
+
+        q_scaled = q * math.sqrt(1.0 / float(q.size(-1)))
+        attn_weights = torch.baddbmm(attn_mask, q_scaled, k.transpose(-2, -1))
+        attn_weights = F.softmax(attn_weights, dim = -1)
+        v = torch.bmm(attn_weights, v)
+        v = v.view(B, self.n_heads, T, d_dim).transpose(1, 2).reshape(B, T, C)
+        return self.out_proj[i](v) + x
+
+
 class Model(nn.Module):
     def __init__(self, config, args):
         super(Model, self).__init__()

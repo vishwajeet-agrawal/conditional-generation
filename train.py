@@ -149,6 +149,8 @@ class Trainer:
                     Pm = self.estimate_modelprob()
                     tvdist = (Pm - self.trueprob_estimate).abs().mean()
                     self.data_generator.save_test_data()
+                    if self.config.debug.print_log:
+                        print(f'Step {step}, Loss: {loss}', f'TV Distance: {tvdist.item()}')
                     # print(f'Step {step}, Loss: {loss}', f'TV Distance: {tvdist.item()}')
                     # print_current_lr(self.optimizer, step)
                     results.append({'datapath':self.data_generator.path, 
@@ -176,9 +178,10 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--config', type = str, default='config.yaml')
     parser.add_argument('--debug', action='store_true', default=False)
-    parser.add_argument('--multiple', action='store_true', default=False)
+    parser.add_argument('--multiple', action='store_true', default=True)
     parser.add_argument('--dryrun', action='store_true', default=False)
     parser.add_argument('--configs', type = str, default='configs.csv')
+    parser.add_argument('--datas', type = str, default='datas.csv')
     args = parser.parse_args()
     config = om.load(args.config)
 
@@ -205,37 +208,38 @@ if __name__ == '__main__':
         # configs = configs[['n_features', 'embedding_dim', 'context_aggregator', 'n_layers']]
         # configs = configs.drop_duplicates()
         data_generators = dict()
-
-        for i, row in tqdm(configs.iterrows()):
-            config_ = om.structured(config)
-            config_.model.n_features = config_.data.n_features = int(row['n_features'])
-            config_.model.embedding_dim = int(row['embedding_dim'])
-            config_.model.aggregator.type = row['context_aggregator']
-            config_.model.aggregator.n_layers = int(row['n_layers'])
-            config_.model.aggregator.n_heads = int(row['n_heads'])
-            config_.model.aggregator.reduce_type = row['reduce_type']
-            config_.model.aggregator.learn_adjacency = row['learn_adjacency']
-            config_.model.aggregator.tie_embeddings = row['tie_embeddings']
-            config_.model.aggregator.tie_aggregator = row['tie_aggregator']
-            if not row['tie_aggregator'] or row['tie_aggregator'] is np.nan:
-                continue
-            print(row['tie_aggregator'])
-            torch.manual_seed(135)
-            torch.cuda.manual_seed(135)
-            model = Model(config_.model, args).to(config_.train.device)
-            data_generator = data_generators.get(config_.data, DataGenerator(config_.data))
-            data_generators[config_.data] = data_generator
-            if config.train.debug.print_log:
-                print(f"""Training on {data_generator.sampler.num_samples} 
-                    samples for {config_.train.n_steps} steps 
-                    with a batch size of {config_.train.batch_size} 
-                    with emb_dim {config_.model.embedding_dim}, 
-                    n_features {config_.model.n_features} 
-                    and context aggregator {config_.model.aggregator.type},
-                    and n_layers {config_.model.aggregator.n_layers}""")
-            trainer = Trainer(model, data_generator, config_.train, args)
-            trainer.train_eval(results)
-            pd.DataFrame(results).to_csv('results.csv')
+        data_configs = pd.read_csv(args.datas)
+        for j, r in data_configs.iterrows():
+            n_features = int(r['n_features'])
+            data_path = str(r['path'])
+            for i, row in tqdm(configs.iterrows()):
+                config_ = om.structured(config)
+                config_.data.path = os.path.join(config.data.dir, data_path)
+                config_.model.n_features = config_.data.n_features = n_features
+                config_.model.embedding_dim = int(row['embedding_dim'])
+                config_.model.aggregator.type = row['context_aggregator']
+                config_.model.aggregator.n_layers = int(row['n_layers'])
+                config_.model.aggregator.n_heads = int(row['n_heads'])
+                config_.model.aggregator.reduce_type = row['reduce_type']
+                config_.model.aggregator.learn_adjacency = row['learn_adjacency']
+                config_.model.aggregator.tie_embeddings = row['tie_embeddings']
+                config_.model.aggregator.tie_aggregator = row['tie_aggregator']
+                torch.manual_seed(135)
+                torch.cuda.manual_seed(135)
+                model = Model(config_.model, args).to(config_.train.device)
+                data_generator = data_generators.get(config_.data, DataGenerator(config_.data))
+                data_generators[config_.data] = data_generator
+                if config.train.debug.print_log:
+                    print(f"""Training on {data_generator.sampler.num_samples} 
+                        samples for {config_.train.n_steps} steps 
+                        with a batch size of {config_.train.batch_size} 
+                        with emb_dim {config_.model.embedding_dim}, 
+                        n_features {config_.model.n_features} 
+                        and context aggregator {config_.model.aggregator.type},
+                        and n_layers {config_.model.aggregator.n_layers}""")
+                trainer = Trainer(model, data_generator, config_.train, args)
+                trainer.train_eval(results)
+                pd.DataFrame(results).to_csv('results.csv')
     else:
         torch.manual_seed(135)
         torch.cuda.manual_seed(135)

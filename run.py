@@ -54,7 +54,7 @@ def main_script():
     try:
         # Your main script logic here
         # For demonstration, let's divide by zero to raise an exception
-        script_to_run = "data.py"
+        script_to_run = "train.py"
         
         # Run the other script
         output = run_script(script_to_run)

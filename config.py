@@ -18,9 +18,14 @@ class DataType(StrEnum):
     binary = 'binary'
     continuous = 'continuous'
 
-class ContextAggregator(StrEnum):
+class ContextAggregatorType(StrEnum):
     sum = 'sum'
     avg = 'avg'
     linear = 'linear'
     attention = 'attention' 
     transformer = 'transformer'
+    mlp = 'mlp'
+
+class AggregatorReduceType(StrEnum):
+    sum = "sum"
+    mean = "mean"

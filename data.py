@@ -6,11 +6,18 @@ import numpy as np
 from itertools import product
 from abc import abstractmethod
 import pandas as pd
+from dataclasses import dataclass
 import torch
+import json
+from functools import cached_property
 from pgmpy.models import BayesianNetwork
 from pgmpy.factors.discrete import TabularCPD
 from pgmpy.inference import VariableElimination
-
+from pgmpy.sampling import GibbsSampling
+import glob
+import os
+import pickle
+from tqdm import tqdm
 class BaseGenerator:
     def __init__(self, config):
         self.config = config
@@ -18,10 +25,7 @@ class BaseGenerator:
     @abstractmethod
     def sample_joint(self, N):
         pass
-    @abstractmethod 
-    def save(self, N, path):
-        X = self.sample_joint(N)
-        pd.DataFrame(X).to_csv(path, index =  False)
+
     @property
     def num_samples(self):
         return np.inf
@@ -76,16 +80,30 @@ class DataFromDistribution(BaseGenerator):
             return np.random.uniform(size=(N, self.n_features))
         else:
             raise ValueError(f'Unknown distribution type: {self.distribution}')
-    
+        
 class DataFromDAG(BaseGenerator):
-    def __init__(self,  config):
+    
+    def __init__(self, config):
+        super().__init__(config)   
+        self.seed = config.get('dist_seed', 0)
         self.n_features = config.n_features
-        self.max_parents = config.source.max_parents
-        self.G = self.create_random_dag(config.source.edge_probability)
-        self.assign_cpt(self.G)
+        self.edge_probability = config.source.edge_probability      
+        self.size_of_cpt = 0
+        self.num_edges = 0
+        self.max_parents = 0
+        if config.load:
+            self.G = self.load(config.path)
+        else:
+            self.G = self.create_random_dag(self.edge_probability)
+            self.assign_cpt(self.G)
+
         self._cp_cache = {}
         self.bn = self.networkx_to_pgmpy()
-        self.infer = VariableElimination(self.bn)
+        self.infer_ve = VariableElimination(self.bn)
+        # self.infer_bp = BeliefPropagation(self.bn)
+        # self.infer_wlw = WeightedLikelihoodWeighting(self.bn)
+        # self.infer_gb = GibbsSampling(self.bn)
+        self.custom_config = {'size_of_cpt': self.size_of_cpt, 'num_edges': self.num_edges, 'max_parents': self.max_parents}
 
     def networkx_to_pgmpy(self):
         G = self.G
@@ -137,20 +155,26 @@ class DataFromDAG(BaseGenerator):
         """Create a random directed acyclic graph (DAG)."""
         G = nx.DiGraph()
         G.add_nodes_from(range(self.n_features))
-        
+        np.random.seed(self.seed)
+        num_edges = 0
+        max_parents = 0
         for i in range(self.n_features):
             num_edges_i = 0
             for j in range(i+1, self.n_features):
                 if np.random.random() < edge_probability:
                     G.add_edge(i, j)
-                num_edges_i += 1
-                if num_edges_i >= self.max_parents:
+                    num_edges_i += 1
+                if num_edges_i >= self.config.source.max_parents:
                     break
-    
+            max_parents = max(max_parents, num_edges_i)
+            num_edges += num_edges_i
+        self.num_edges = num_edges
+        self.max_parents = max_parents
         return G
 
     def assign_cpt(self, G):
         """Assign conditional probability tables (CPTs) to each node."""
+        np.random.seed(self.seed)
         for node in G.nodes():
             parents = list(G.predecessors(node))
             n_parents = len(parents)
@@ -158,23 +182,44 @@ class DataFromDAG(BaseGenerator):
             # Create CPT
             cpt_shape = [2] * (n_parents + 1)
             cpt = np.random.dirichlet(np.ones(2), size=cpt_shape[:-1]).reshape(cpt_shape)
+            self.size_of_cpt += cpt.flatten().shape[0]
             # print(cpt.shape)
-            print(node, cpt.sum(axis = -1), file= open('cpt.txt', 'a'))
             # exit()
             # Assign CPT to node
             G.nodes[node]['cpt'] = cpt
             G.nodes[node]['parents'] = parents
-    
+
+    def load(self, path):
+        path = path + '/dist.pkl'
+        with open(path, 'rb') as f:
+            G = pickle.load(f)
+        return G
+
+    def save(self, path):
+        ans = dict()
+        ans['n_nodes'] = self.n_features
+        ans['edges'] = []
+        ans['cpt'] = dict()
+        for node in self.G.nodes():
+            ans['edges'].extend([(node, parent) for parent in self.G.nodes[node]['parents']])
+            ans['cpt'][node] = self.G.nodes[node]['cpt'].tolist()
+
+        with open(path + '/dist.json', 'w') as f:
+            json.dump(ans, f)
+        with open(path + '/dist.pkl', 'wb') as f:
+            pickle.dump(self.G, f)
+
     def reset_cp_cache(self):
         self._cp_cache = {}
     def _conditional_probability(self, i, S, evidence):
         evidence = {str(k): v for k, v in evidence.items()}
         key = (str(i), tuple(evidence.items()))
         if key not in self._cp_cache:   
-            self._cp_cache[key] =  self.infer.query([str(i)], evidence = evidence)
+            self._cp_cache[key] =  self.infer_ve.query([str(i)], evidence = evidence)
         return self._cp_cache[key]
     
-    def sample_joint(self, n_samples):
+    def sample_joint(self, n_samples, seed):
+        np.random.seed(seed)
         G = self.G
         """Generate samples from the Bayesian Network."""
         samples = np.zeros((n_samples, len(G.nodes)), dtype=int)
@@ -196,19 +241,25 @@ class DataFromDAG(BaseGenerator):
     def estimate_conditional_prob(self, X, I, S):
         P = np.zeros(X.shape[0])
         self.reset_cp_cache()
+        
         for j in range(X.shape[0]):
             i = [k for k in range(self.n_features) if I[j, k] == 1][0]
             s = {k for k in range(self.n_features) if S[j, k] == 1}
+            # print(i, s)
             assert i not in s
-            result = self._conditional_probability(i, s, evidence = {k: X[j, k].cpu().item() for k in s})
+            result = self._conditional_probability(i, s, evidence = {k: X[j, k] for k in s})
             
-            P[j] = result.values[int(X[j, i].item())]
+            P[j] = result.values[X[j, i]]
         return P
 
 class DataGenerator:
-    def __init__(self, config):
+    def __init__(self, config, save=True):
         self.config = config
         self.n_features = self.config.n_features
+        self.test_data_saved = False
+        self.path = self.set_path(config.dir) if not config.get('load', False) else config.path
+        self.test_seed = config.get('test_seed', 0)
+        
         if self.config.source.type == SourceType.samples:
             self.sampler = DataFromFile(self.config)
         elif self.config.source.type == SourceType.distribution:
@@ -217,12 +268,33 @@ class DataGenerator:
             self.sampler = DataFromDAG(self.config)
         else:
             raise ValueError(f'Unknown source type: {self.config.source.type}')
-    def sample_conditional(self, N):  
-        X = self.sampler.sample_joint(N)
-        S = np.zeros((N, self.n_features))
+       
+
+        if config.save:
+            self.save_dist()
+            self.save_test_data()
+
+    def set_path(self, dir):
+        subfiles = glob.glob(dir + '/*')
+        if len(subfiles) == 0:
+            fol = dir + '/1'
+            os.makedirs(fol)
+            return fol
+        else:
+            for i in range(10000):
+                fol = dir + f'/{i}'
+                if f'{i}' not in [sf.split('/')[-1] for sf in subfiles]:
+                    os.makedirs(fol)
+                    return fol
+           
+    def sample_conditional(self, N, seed):  
+        X = self.sampler.sample_joint(N, seed)
+        S = np.zeros((N, self.n_features), dtype = int)
         
         Xi = np.zeros(N)
         Ii = np.zeros(N)
+
+        np.random.seed(seed)
         if self.config.mask.distribution == MaskDistributionType.truncnorm:
             mean = self.config.mask.params.mean
             std = self.config.mask.params.std
@@ -234,6 +306,7 @@ class DataGenerator:
             masksize = np.random.uniform(minms, maxms, size = (N,))
         elif self.config.mask.distribution == MaskDistributionType.delta:
             masksize = np.ones(N) * self.config.mask.params.value
+
         masksize = np.clip(masksize, 1, self.n_features)
         for i in range(N):
             indices = np.random.choice(np.arange(self.n_features), int(masksize[i]), replace=False)
@@ -245,25 +318,72 @@ class DataGenerator:
         Ii = np.eye(self.n_features)[Ii.astype(int)]
         return X, Xi, Ii, S
     
-    def sample_marginal(self, N):
-        X = self.sample_joint(N)
+    def sample_marginal(self, N, seed):
+        X = self.sampler.sample_joint(N, seed)
+        np.random.seed(seed)
         S = np.zeros((N, self.n_features))
-        if self.config.data.mask.distribution == MaskDistributionType.truncnorm:
-            mean = self.config.data.mask.params.mean
-            std = self.config.data.mask.params.std
+        if self.config.mask.distribution == MaskDistributionType.truncnorm:
+            mean = self.config.mask.params.mean
+            std = self.config.mask.params.std
             masksize = np.random.normal(mean, std, size = (N,))
-        elif self.config.data.mask.distribution == MaskDistributionType.uniform:
+        elif self.config.mask.distribution == MaskDistributionType.uniform:
             minms = max(int(self.config.mask.params.min * self.n_features) - 1, 0)
             maxms = min(int(self.config.mask.params.max * self.n_features), self.n_features)
             masksize = np.random.uniform(minms, maxms, size = (N,))
-        elif self.config.data.mask.distribution == MaskDistributionType.delta:
-            masksize = np.ones(N) * self.config.data.mask.params.value
+        elif self.config.mask.distribution == MaskDistributionType.delta:
+            masksize = np.ones(N) * self.config.mask.params.value
         for i in range(N):
             masksize = np.clip(masksize, 0, self.n_features - 1)
             indices = np.random.choice(np.arange(self.n_features), int(masksize[i]), replace=False)
             S[i, indices] = 1
         return X, S
+    
+    def save_test_data(self):
+        if not self.config.load:
+            X, Xi, I, S, P = self.test_data
+            path = self.path + '/test_data.npz'
+            np.savez(path, X = X, S = S, I = I, Xi = Xi, P = P)
+    
+    def generate_test_data(self, N, seed):
+        X, Xi, I, S = self.sample_conditional(N, seed)
+        P = self.sampler.estimate_conditional_prob(X, I, S)
+        return X, Xi, I, S, P
 
+            
+    def save_dist(self):
+        if not self.config.load:
+            self.sampler.save(self.path)
+            path = self.path + '/config.yaml'
+            resolved_cfg = om.to_container(self.config, resolve=True)
+            resolved_cfg.pop('save', None)
+            resolved_cfg.pop('load', None)
+            resolved_cfg.pop('dir', None)
+            for key in self.sampler.custom_config:
+                resolved_cfg[key] = self.sampler.custom_config[key]
+            om.save(resolved_cfg, path)
+        
+
+    @cached_property
+    def test_data(self):
+        if self.config.load:
+            path = self.path + '/test_data.npz'
+            data = np.load(path)
+            X = data['X']
+            Xi = data['Xi']
+            I = data['I']
+            S = data['S']
+            P = data['P']
+            return X, Xi, I, S, P
+        X, Xi, I, S = self.sample_conditional(self.config.eval_size, seed = self.test_seed)
+        P = self.sampler.estimate_conditional_prob(X, I, S)
+        return X, Xi, I, S, P
+    
+
+    @property
+    def estimate_true_prob(self):
+        return self.test_data[-1]
+
+    
     def estimate_prob(self, X, S, N):
         P = np.zeros(X.shape[0], self.n_features)
         Xj = self.sampler.sample_joint(N)
@@ -282,20 +402,48 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser()
     # parser.add_argument('--config', type = str, default='config_data.yaml')
-    parser.add_argument('--n_samples', type = int, default=10000)
-    parser.add_argument('--path', type = str, default='data.csv')
+    parser.add_argument('--test_samples', type = int, default=10000)
+    parser.add_argument('--dir', type = str, default='data')
     parser.add_argument('--nf', type = int, default=10)
     parser.add_argument('--ep', type = float, default=0.2)
-    parser.add_argument('--configs', type = str, default='datasets/info.csv')
-    parser.add_argument('--multiple', action='store_true', default=False)
+    parser.add_argument('--configs', type = str, default='data_configs.csv')
+    parser.add_argument('--multiple', action='store_true', default=True)
+    parser.add_argument('--mask_dist', type = str, default='uniform')
+    parser.add_argument('--mask_min', type = float, default=0.2)
+    parser.add_argument('--mask_max', type = float, default=0.8)
+    parser.add_argument('--n_repeats', type = float, default=5)
+    # exit()
+    # raise NotImplementedError('This script is not ready yet')
     args = parser.parse_args()
+    datas = []
     # config = om.load(args.config)
     if args.multiple:
         configs = pd.read_csv(args.configs)
-        for i in range(len(configs)):
+        for i in tqdm(range(len(configs))):
             config = configs.iloc[i]
-            data_generator = DataGenerator(om.create({'n_features': int(config['n_features']), 'source': {'type': 'dag', 'edge_probability': float(config['edge_probability'])}}))
-            data_generator.sampler.save(args.n_samples, 'datasets/'+config['path'])
+            for j in range(args.n_repeats):
+                data_generator = DataGenerator(om.create({'n_features': int(config['n_features']), 
+                                                        'source': {'type': 'dag', 
+                                                                    'edge_probability': float(config['edge_probability']),
+                                                                    'max_parents': int(config['max_parents'])},
+                                                        'dir' : args.dir,
+                                                        'eval_size': args.test_samples,
+                                                        'load': False,
+                                                        'save': True,
+                                                        'test_seed': j + 101,
+                                                        'dist_seed': j + 101,
+                                                        'mask': {
+                                                            'distribution':args.mask_dist,
+                                                            'params': {'min': args.mask_min, 'max': args.mask_max}
+                                                        }}))
+                datas.append({'path': data_generator.path,
+                            'n_features': data_generator.n_features,
+                            'source': 'dag',
+                            'max_parents': data_generator.sampler.max_parents,
+                            'num_edges': data_generator.sampler.num_edges,
+                            'size_of_cpt': data_generator.sampler.size_of_cpt,
+                            })
+        pd.DataFrame(datas).to_csv('datas.csv', index = False)
     else:
         config = om.create({'n_features': args.nf, 'source': {'type': 'dag', 'edge_probability': args.ep}})
         data_generator = DataGenerator(config)

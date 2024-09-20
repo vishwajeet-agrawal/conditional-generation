@@ -102,18 +102,20 @@ class MLPAggregator(ContextAggregator):
         self.tie_aggregate = config.aggregator.tie_aggregator
         self.reduce_type = config.aggregator.reduce_type
         self.learn_adjacency = config.aggregator.learn_adjacency
+        self.n_heads = config.aggregator.n_heads
         factory_kwargs = {'device': config.device, 'dtype': torch.float32}
+        assert self.embedding_dim % self.n_heads == 0
         if not config.aggregator.learn_adjacency:
-            self.aggregator = torch.ones((self.n_layers, self.n_features, self.n_features)
+            self.aggregator = torch.ones((self.n_layers, self.n_heads, self.n_features, self.n_features)
                                          , device = config.device)/ self.n_features
         else:    
             if self.tie_aggregate:
-                self.aggregator_ = nn.Parameter(torch.empty((self.n_features, self.n_features), **factory_kwargs))
+                self.aggregator_ = nn.Parameter(torch.empty((self.n_heads, self.n_features, self.n_features), **factory_kwargs))
                 self.aggregator = [self.aggregator_ for _ in range(self.n_layers)]
                 nn.init.xavier_normal_(self.aggregator[0])
             else:
                 self.aggregator = [
-                    nn.Parameter(torch.empty((self.n_features, self.n_features), **factory_kwargs))
+                    nn.Parameter(torch.empty((self.n_heads, self.n_features, self.n_features), **factory_kwargs))
                     for _ in range(self.n_layers)]
                 [nn.init.xavier_normal_(self.aggregator[i]) for i in range(self.n_layers)]
             [self.register_parameter(f'aggregator_{i}', self.aggregator[i]) for i in range(self.n_layers)]
@@ -131,7 +133,14 @@ class MLPAggregator(ContextAggregator):
         return params_count
   
     def aggregate(self, x, i, m):
-        y = torch.bmm(self.aggregator[i].unsqueeze(0) * m.unsqueeze(1), x)
+        B, T, C = x.size()
+        d_dim = self.embedding_dim//self.n_heads
+        x = x.view(B, T, self.n_heads, d_dim).transpose(1, 2).view(B*self.n_heads, T, d_dim)
+        agg = self.aggregator[i].unsqueeze(0).repeat(B, 1, 1, 1).view(B*self.n_heads, T, T)
+        m_r = m.unsqueeze(1).repeat(1, self.n_heads, 1).view(B*self.n_heads, T)
+        y = torch.bmm(agg * m_r.unsqueeze(1), x)
+        y = y.view(B, self.n_heads, T, d_dim).transpose(1, 2).view(B, T, C)
+        
         if self.reduce_type == AggregatorReduceType.sum:
             return y
         elif self.reduce_type == AggregatorReduceType.mean:

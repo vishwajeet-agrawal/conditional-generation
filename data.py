@@ -100,6 +100,9 @@ class DataFromDAG(BaseGenerator):
         self._cp_cache = {}
         self.bn = self.networkx_to_pgmpy()
         self.infer_ve = VariableElimination(self.bn)
+        # print('Create Gibbs Sampling')
+        # self.infer_gb = GibbsSampling(self.bn)
+        # print('End Gibbs Sampling')
         # self.infer_bp = BeliefPropagation(self.bn)
         # self.infer_wlw = WeightedLikelihoodWeighting(self.bn)
         # self.infer_gb = GibbsSampling(self.bn)
@@ -409,9 +412,9 @@ if __name__ == '__main__':
     parser.add_argument('--configs', type = str, default='data_configs.csv')
     parser.add_argument('--multiple', action='store_true', default=True)
     parser.add_argument('--mask_dist', type = str, default='uniform')
-    parser.add_argument('--mask_min', type = float, default=0.2)
-    parser.add_argument('--mask_max', type = float, default=0.8)
-    parser.add_argument('--n_repeats', type = float, default=5)
+    parser.add_argument('--mask_min', type = float, default=0)
+    parser.add_argument('--mask_max', type = float, default=1)
+    parser.add_argument('--n_repeats', type = float, default=3)
     # exit()
     # raise NotImplementedError('This script is not ready yet')
     args = parser.parse_args()
@@ -422,6 +425,7 @@ if __name__ == '__main__':
         for i in tqdm(range(len(configs))):
             config = configs.iloc[i]
             for j in range(args.n_repeats):
+                print(f'Generating data {i} with seed {j}')
                 data_generator = DataGenerator(om.create({'n_features': int(config['n_features']), 
                                                         'source': {'type': 'dag', 
                                                                     'edge_probability': float(config['edge_probability']),

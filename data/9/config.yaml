@@ -1,0 +1,16 @@
+n_features: 100
+source:
+  type: dag
+  edge_probability: 0.2
+  max_parents: 3
+eval_size: 10000
+test_seed: 101
+dist_seed: 101
+mask:
+  distribution: uniform
+  params:
+    min: 0
+    max: 1
+size_of_cpt: 4736
+num_edges: 268
+max_parents: 3

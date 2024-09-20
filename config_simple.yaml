@@ -1,0 +1,32 @@
+data:
+  type: 'binary'
+  n_features: 50
+  source: 
+    type: 'dag'
+    edge_probability: 0.2
+    max_parents: 10
+  mask:
+    distribution: 'uniform'
+    params:
+      min: 0.2
+      max: 0.8
+    
+model:
+  n_features: '${data.n_features}'
+  data_type: '${data.type}'
+  embedding_dim: 300
+  score_function:  'exp'
+  context_aggregator: 'attention'
+  
+train:
+  lr: 0.01
+  model_path: 'models/model.pth'
+  device: 'cuda'
+  n_steps: 510
+  batch_size: 256
+  batches_per_epoch: 50
+  eval_size: 10000
+  debug:
+    print_interval: 200
+    save_interval: 50
+  log_interval: 250

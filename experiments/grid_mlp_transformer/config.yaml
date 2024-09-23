@@ -1,0 +1,49 @@
+data:
+  dir: 'data'
+  path: 'data/9'
+  type: 'binary'
+  n_features: 100
+  load: true
+  save: false
+  source: 
+    type: 'dag'
+    edge_probability: 0.2
+    max_parents: 10
+  mask:
+    distribution: 'uniform'
+    params:
+      min: 0.2
+      max: 0.8
+  eval_size: ${train.eval_size}
+  
+model:
+  n_vocab: 2
+  n_features: '${data.n_features}'
+  data_type: '${data.type}'
+  embedding_dim: 64
+  dropout: 0.5
+  aggregator: 
+    type: 'transformer'
+    n_heads: 4
+    n_layers: 8
+    tie_embeddings: true
+    tie_aggregator: false
+    reduce_type: 'mean'
+    learn_adjacency: true
+  device: ${train.device}
+
+  
+train:
+  lr_schedule: [[1000, 0.01], [1000, 0.001]]
+  save_dir: 'checkpoints'
+  device: 'cuda'
+  n_steps: 20000
+  batch_size: 64
+  batches_per_epoch: 50
+  eval_size: 5000
+  debug:
+    print_log: true
+    print_interval: 200
+    save_interval: 50
+  log_interval: 50
+  save_interval: 2000

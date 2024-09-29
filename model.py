@@ -9,6 +9,8 @@ from torch.nn import functional as F
 from torch.distributions import Normal
 from util import stable_softmax
 import math
+from functools import cached_property
+
 
 class Dropout(nn.Dropout):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -40,6 +42,7 @@ class FFN(nn.Module):
 class ContextAggregator(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.pass_i = config.aggregator.i_in_context
         self.embedding_dim = config.embedding_dim
         self.n_features = config.n_features
         self.n_vocab = config.n_vocab
@@ -64,15 +67,18 @@ class ContextAggregator(nn.Module):
         
     def token_to_embeddings(self, X, S):
         Xm = X * S + (1 - S) * self.n_vocab
-        embeddings = [self.embeddings[i](Xm[:, i]) for i in range(self.n_features)]
+        Xm_stacked = Xm.transpose(0, 1)  # Shape: (n_features, batch_size)
+        embeddings = torch.nn.parallel.parallel_apply(self.embeddings, Xm_stacked)
+        # embeddings = [self.embeddings[i](Xm[:, i]) for i in range(self.n_features)]
         embeddings = torch.stack(embeddings, dim = 1)
         embeddings =  embeddings + self.positional_embeddings.unsqueeze(0)
         return embeddings
         
     def forward(self, X, I, S):
         x = self.token_to_embeddings(X, S)
+        S_ = I + S if self.pass_i else S
         for i in range(self.n_layers):
-            x_ = self.aggregate(x, i, I + S)
+            x_ = self.aggregate(x, i, S_)
             x = x + self.dropout(self.agg_norm[i](x_))
             x_ = self.ffns[i](x)
             x = x + self.dropout(self.ffn_norm[i](x_))
@@ -135,11 +141,11 @@ class MLPAggregator(ContextAggregator):
     def aggregate(self, x, i, m):
         B, T, C = x.size()
         d_dim = self.embedding_dim//self.n_heads
-        x = x.view(B, T, self.n_heads, d_dim).transpose(1, 2).view(B*self.n_heads, T, d_dim)
+        x = x.view(B, T, self.n_heads, d_dim).transpose(1, 2).reshape(B*self.n_heads, T, d_dim)
         agg = self.aggregator[i].unsqueeze(0).repeat(B, 1, 1, 1).view(B*self.n_heads, T, T)
         m_r = m.unsqueeze(1).repeat(1, self.n_heads, 1).view(B*self.n_heads, T)
         y = torch.bmm(agg * m_r.unsqueeze(1), x)
-        y = y.view(B, self.n_heads, T, d_dim).transpose(1, 2).view(B, T, C)
+        y = y.view(B, self.n_heads, T, d_dim).transpose(1, 2).reshape(B, T, C)
         
         if self.reduce_type == AggregatorReduceType.sum:
             return y
@@ -192,17 +198,30 @@ class TransformerAggregator(ContextAggregator):
         return self.out_proj[i](v)
 
 class Model(nn.Module):
-    def __init__(self, config, args):
+    def __init__(self, config):
         super(Model, self).__init__()
         self.config = config
-        self.args = args
-        self.embedding = nn.Embedding(config.n_vocab, config.embedding_dim)
+        self.embeddings = nn.Parameter(torch.empty((config.n_features, config.embedding_dim, config.n_vocab)))
+        nn.init.xavier_normal_(self.embeddings)
+        # self.embeddings = nn.ModuleList([nn.Embedding(config.n_vocab, config.embedding_dim) for i in range(config.embedding_dim)])
+        # self.embedding = nn.Parameter(torch.empty((config.n_features, config.n_vocab, config.embedding_dim)))
+        # self.embedding = nn.Embedding(config.n_vocab , config.embedding_dim)
         self.context_agg = MLPAggregator(config) if config.aggregator.type == ContextAggregatorType.mlp\
                 else TransformerAggregator(config) if config.aggregator.type == ContextAggregatorType.transformer else None
           
     def forward(self, X, I, S):
         Fxs = self.context_agg(X, I, S)
-        logits = F.linear(Fxs, self.embedding.weight, None)
+        # Xr = (X * I).sum(dim=-1)
+        # Xr_oh = F.one_hot(Xr.long(), self.config.n_vocab)
+        
+        embedding = torch.einsum('ij,jkl->ikl', I.float(), self.embeddings)
+        # embedding = torch.bmm(I.unsqueeze(1), self.embeddings.unsqueeze(0).repeat(I.size(0), 1, 1, 1)).squeeze(1)
+        # Fxi = torch.bmm(Xr_oh.unsqueeze(1).float(), embedding).squeeze(1)
+        # print(Fxs.shape, embedding.shape)
+        logits = torch.bmm(Fxs.unsqueeze(1), embedding).squeeze(1) 
+        # logits = F.linear(Fxs, embedding.transpose(0, 1), None)
+        # logits = (Fxs * Fxi).sum(dim = -1)
+        # print(logits.shape)
         return logits
     
     def predict(self, X, I, S):
@@ -233,5 +252,5 @@ class Model(nn.Module):
     @property 
     def parameter_count(self):
         params_count = self.context_agg.parameter_count
-        params_count['embeddings'] += sum(p.numel() for p in self.embedding.parameters())
+        params_count['embeddings'] += self.config.n_features* self.config.n_vocab* self.config.embedding_dim
         return params_count

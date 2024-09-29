@@ -6,7 +6,7 @@ from omegaconf import OmegaConf as om
 from argparse import ArgumentParser
 import pandas as pd
 from tqdm import tqdm
-
+from itertools import product
 def get_model_data_params(row_, model, data_generator):
 
     params = om.create(row_.loc[0].to_dict())    
@@ -20,15 +20,18 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--config', type = str, default='config.yaml')
     parser.add_argument('--debug', action='store_true', default=False)
-    parser.add_argument('--configs', type = str, default='configs.csv')
+    parser.add_argument('--configs', type = str, default='configs.yaml')
     parser.add_argument('--datas', type = str, default='datas.csv')
     parser.add_argument('--configs_save', type = str, default='configs_all.csv')
     
+    configs = om.load('configs.yaml')
+    hyperparams = product(*configs.values())
+    configs = pd.DataFrame(hyperparams, columns=configs.keys())
+
 
     args = parser.parse_args()
     config = om.load(args.config)
     configs_all = []
-    configs = pd.read_csv(args.configs)
 
     data_generators = dict()
     data_configs = pd.read_csv(args.datas)
@@ -42,7 +45,7 @@ if __name__ == '__main__':
             # config_.train.save_dir = args.save_dir
             config_.model.n_features = config_.data.n_features = n_features
             config_.model.embedding_dim = int(row['embedding_dim'])
-            config_.model.aggregator.type = row['context_aggregator']
+            config_.model.aggregator.type = row['aggregator']
             config_.model.aggregator.n_layers = int(row['n_layers'])
             config_.model.aggregator.n_heads = int(row['n_heads'])
             config_.model.aggregator.i_in_context = row['i_in_context']

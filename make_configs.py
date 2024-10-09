@@ -1,5 +1,5 @@
 import torch
-from model import Model
+from model import GeneralModel
 from data import DataGenerator
 import os
 from omegaconf import OmegaConf as om
@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 import pandas as pd
 from tqdm import tqdm
 from itertools import product
+from util import torch_rand
 def get_model_data_params(row_, model, data_generator):
 
     params = om.create(row_.loc[0].to_dict())    
@@ -44,22 +45,17 @@ if __name__ == '__main__':
             config_.data.path = os.path.join(config.data.dir, data_path)
             # config_.train.save_dir = args.save_dir
             config_.model.n_features = config_.data.n_features = n_features
-            config_.model.embedding_dim = int(row['embedding_dim'])
-            config_.model.aggregator.type = row['aggregator']
-            config_.model.aggregator.n_layers = int(row['n_layers'])
-            config_.model.aggregator.n_heads = int(row['n_heads'])
-            config_.model.aggregator.i_in_context = row['i_in_context']
+            config_.model.context_dim = int(row['context_dim'])
+            config_.model.output.hidden_dim = int(row['hidden_dim'])
+            config_.model.output.n_layers = int(row['n_layers'])
             row_ = pd.DataFrame({'datapath': config_.data.path,
                                     'n_features': n_features,
-                                    'embedding_dim': config_.model.embedding_dim,
-                                    'aggregator': config_.model.aggregator.type,
-                                    'n_layers': config_.model.aggregator.n_layers,
-                                    'n_heads': config_.model.aggregator.n_heads,
-                                    'i_in_context': config_.model.aggregator.i_in_context}, index = [0])
+                                    'context_dim': config_.model.context_dim,
+                                    'n_layers': config_.model.output.n_layers,
+                                    'hidden_dim': config_.model.output.hidden_dim}, index = [0])
 
-            torch.manual_seed(135)
-            torch.cuda.manual_seed(135)
-            model = Model(config_.model).to(config_.train.device)
+            torch_rand(135)
+            model = GeneralModel(config_.model).to(config_.train.device)
             path = config_.data.path + '/config.yaml'
             with open(path, 'r') as f:
                 config__ = om.load(f)

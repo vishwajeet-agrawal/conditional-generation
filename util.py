@@ -12,6 +12,7 @@ class StrEnum(str, Enum):
         return f"'{str(self)}'"
     
 import torch
+
 def stable_softmax(X):
     all_neg_inf = torch.all(X == float("-inf"), dim = -1)
     max_ = torch.max(X, dim = -1)[0]
@@ -21,3 +22,21 @@ def stable_softmax(X):
     sum_scores = torch.where(sum_scores == 0, 1, sum_scores)
     return exp_scores / sum_scores
 
+
+def generate_permutations(n, num_permutations, device, seed = None):
+    if seed is not None:
+        torch_rand(seed)
+    noise = torch.rand(num_permutations, n, device=device)
+    permutations = noise.argsort(dim = -1)
+    return permutations
+
+def boostrap(X):
+    return X[torch.randperm(X.size(0))]
+
+
+def torch_rand(seed):
+    if torch.backends.cudnn.is_available():
+        torch.cuda.manual_seed(seed)
+    if torch.backends.mps.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.manual_seed(seed)

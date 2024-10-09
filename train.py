@@ -5,11 +5,15 @@ from torch.nn import functional as F
 from functools import cached_property
 import glob
 import os
-import fcntl
 import numpy as np
-from torch.optim.lr_scheduler import _LRScheduler
 from tqdm import tqdm
-from time import sleep
+from model import GeneralModel as Model
+from data import DataGenerator
+from argparse import ArgumentParser
+from omegaconf import OmegaConf as om
+import time
+from util import torch_rand
+
 def get_attn_mask(S, device):
     N = S.size(0)
     n = S.size(1)
@@ -20,9 +24,9 @@ def get_attn_mask(S, device):
     attn_mask = torch.zeros_like(attn_mask, dtype=torch.float).masked_fill_(attn_mask, float("-inf"))
     return attn_mask
 
-def np_to_torch(X, device, dtype =  torch.float32):
+def np_to_torch(X, device, dtype = torch.float32):
     device = torch.device(device)
-    return torch.from_numpy(X).to(device).type(dtype)
+    return torch.from_numpy(X).type(dtype).to(device)
 
 
 class Scheduler:
@@ -70,61 +74,72 @@ class Trainer:
                 os.makedirs(self.config.save_dir + f'/{i}')
                 path =  self.config.save_dir + f'/{i}'
                 break
-        
         return path
-            
-            
-
         
-        
-        
-    def train_step(self, X, Xi, I, S):
+    def train_step(self, X, I, S):
         self.optimizer.zero_grad()
         logits = self.model(X, I, S)
+        Xi = (X * I).sum(dim = -1)
         loss = F.cross_entropy(logits, Xi)
         loss.backward()
         self.optimizer.step()
         return loss.item()
     
-    def to_torch(self, X, Xi, I, S):
-        X = np_to_torch(X, self.config.device, dtype=torch.int)
-        Xi = np_to_torch(Xi, self.config.device, dtype=torch.long)
-        I = np_to_torch(I, self.config.device, dtype=torch.int)
-        S = np_to_torch(S, self.config.device, dtype=torch.int)
-        return X, Xi, I, S
-    
+    def to_torch(self, *arrays):
+        return [np_to_torch(arr, self.config.device, dtype=torch.int) for arr in arrays]
+       
     def get_batch(self, n_samples):
-        X, Xi, I, S = self.data_generator.sample_conditional(n_samples)
-        return self.to_torch(X, Xi, I, S)
+        X, S, I, J = self.data_generator.sample_conditional(n_samples, nomask = self.config.fullcontext)
+        
+        J = np.eye(X.shape[-1])[J]
+        I = np.eye(X.shape[-1])[I]
+        S = S + J
+        return self.to_torch(X, I, S)
     
-    def get_mini_batch(self, X, Xi, I, S):
-        N = X.size(0)
+    def get_mini_batch(self, *tensors):
+        N = tensors[0].size(0)
         batch_num = N // self.config.batch_size
         for i in range(batch_num):
             start = i * self.config.batch_size
             end = (i + 1) * self.config.batch_size
-            yield X[start:end], Xi[start:end], I[start:end], S[start:end]
+            yield [t[start:end] for t in tensors]
 
     def train_epoch(self):
-        X, Xi, I, S = self.get_batch(self.config.batches_per_epoch * self.config.batch_size)
-        
+        X, I, S = self.get_batch(self.config.batches_per_epoch * self.config.batch_size)
         loss = 0
-        for Xb, Xib, Ib, Sb in self.get_mini_batch(X, Xi, I, S):
-            loss += self.train_step(Xb, Xib, Ib, Sb) 
+        for Xb, Ib, Sb in self.get_mini_batch(X, I, S):
+            loss += self.train_step(Xb, Ib, Sb) 
         return loss/self.config.batches_per_epoch
     
     @property
     def trueprob_estimate(self):
+        P = self.data_generator.estimate_true_prob
         return torch.from_numpy(self.data_generator.estimate_true_prob).to(self.config.device)
+ 
+    def estimate_tvdist_each(self):
+        X, S, I, J, P = self.data_generator.test_data
+        I = np.eye(X.shape[-1])[I]
+        J = np.eye(X.shape[-1])[J]
+        X, S, I, J = self.to_torch(X, S, I, J)
+        P = torch.from_numpy(P).to(torch.float32).to(self.config.device)
+        P = P[:, :4]
+        tP_i_S, tP_j_S, tP_i_S_j, tP_j_S_i = P.chunk(4, dim = -1)
+        
+        P_i_S, P_j_S, P_i_S_j, P_j_S_i = self.model.evaluate_batched(X, (S, I, J), 'probability_ij_S', self.config.batch_size)
+        
+        tvdist = (tP_i_S - P_i_S).abs() + (tP_j_S - P_j_S).abs() + (tP_i_S_j - P_i_S_j).abs() + (tP_j_S_i - P_j_S_i).abs()
+        tvdist = tvdist / 4
+        return tvdist
     
-    @property
-    def test_data(self):
-        X, Xi, I, S, P = self.data_generator.test_data
-        return self.to_torch(X, Xi, I, S)
-
-    def estimate_modelprob(self):
-        X, Xi, I, S = self.test_data
-        return self.model.estimate_prob(X, Xi, I, S, self.config.batch_size)
+    def estimate_tvdist_nocontext(self):
+        X, S, I, J, P = self.data_generator.test_data
+        I = np.eye(X.shape[-1])[I]
+        X, I = self.to_torch(X, I)
+        S = 1 - I
+        tP = torch.form_numpy(P).to(self.config.device)[:, 4]
+        P = self.model.evaluate_batched(X, (S, I), 'probability_i_S', self.config.batch_size)
+        tvdist = (tP - P).abs().mean()
+        return tvdist
     
     def save_model(self):
         torch.save(self.model.state_dict(), self.path + '/model.pth')
@@ -143,43 +158,103 @@ class Trainer:
             config.data[key] = self.data_generator.sampler.custom_config[key]
         resolved_cfg = om.to_container(config, resolve = True)
         om.save(resolved_cfg, self.path + '/config.yaml')
-        
+    
+    def spearman_corr(self, x, y):
+        x_rank = torch.argsort(torch.argsort(x)).float()
+        y_rank = torch.argsort(torch.argsort(y)).float()
+        x_mean = x_rank.mean()
+        y_mean = y_rank.mean()
+        covariane = torch.mean((x_rank - x_mean) * (y_rank - y_mean))
+        x_std = x_rank.std()
+        y_std = y_rank.std()
+        return covariane / (x_std * y_std)
+    
+    def flatten_metrics(self, metrics):
+        metrics_flat = {}
+        for k, v in metrics.items():
+            if isinstance(v, dict):
+                for kk, vv in v.items():
+                    metrics_flat[k + '_' + kk] = vv
+            else:
+                metrics_flat[k] = v
+        return metrics_flat
+    
+    def get_metrics(self):
+        metrics = {}
+        if self.config.fullcontext:
+            metrics['tvdist'] = self.estimate_tvdist_nocontext()
+            if self.config.eval.consistency.path:
+                metrics['path_ct_std'], metrics['path_ct_stdr'] = self.model.evaluate_batched(X, [], 'path_consistency', self.config.batch_size)
+        else:
+            tvdist = self.estimate_tvdist_each()
+            metrics['tvdist'] = tvdist.mean()
+       
+            X, S, I, J, P = self.data_generator.test_data
+            I = np.eye(X.shape[-1])[I]
+            J = np.eye(X.shape[-1])[J]
+            X, S, I, J = self.to_torch(X, S, I, J)
+            if self.config.eval.consistency.autoregressive:
+                metrics['auto_ct_std'], metrics['auto_ct_stdr'] = self.model.evaluate_batched(X, [], 'autoregressive_consistency', self.config.batch_size)
+
+            if self.config.eval.consistency.swap:
+                pdiffl1, pdiffl2, pdifflog = self.model.evaluate_batched(X, [S, I, J], 'swap_consistency', self.config.batch_size)
+                metrics['swap_ct'] = dict(l1 = pdiffl1.mean(), l2 = pdiffl2.mean(), log = pdifflog.mean())
+                ## correlation between tvdist and swap_ct
+                metrics['correlations_swapct_tvdist'] = dict(l1 = self.spearman_corr(tvdist, pdiffl1),
+                                                            l2 = self.spearman_corr(tvdist, pdiffl2),
+                                                            log = self.spearman_corr(tvdist, pdifflog))
+        return metrics
+
+
     def train_eval(self, results = None, results_path = None):
         np.random.seed(135)
         num_batches = self.config.batches_per_epoch
         last_log = 0
         last_save = 0
         step = 0
+        a = time.time()
+        with torch.no_grad():
+            metrics = self.get_metrics()
+            metrics = self.flatten_metrics(metrics)
+            b = time.time()
+            print(f'Get metrics time: {b-a}')
+            if self.config.print_log:
+                print(f'Step {step}, TV Distance: {metrics['tvdist'].item()}')
+                
         for i in range(self.config.n_steps // num_batches):
+            
             loss = self.train_epoch()
             step += num_batches
             self.scheduler.step(step)
 
             if step - last_log >= self.config.log_interval:
+                b = time.time()
+                print(f'Training Time: {b-a}')
                 last_log = step
                 with torch.no_grad():
-                    Pm = self.estimate_modelprob()
-                    tvdist = (Pm - self.trueprob_estimate).abs().mean()
-                    self.data_generator.save_test_data()
-                    if self.config.debug.print_log:
-                        print(f'Step {step}, Loss: {loss}', f'TV Distance: {tvdist.item()}')
-                    # print(f'Step {step}, Loss: {loss}', f'TV Distance: {tvdist.item()}')
-                    # print_current_lr(self.optimizer, step)
+                    a = time.time()
+                    metrics = self.get_metrics()
+                    metrics = self.flatten_metrics(metrics)
+                    b = time.time()
+                    print(f'Get metrics time: {b-a}')
+                    if self.config.print_log:
+                        print(f'Step {step}, Loss: {loss}', f'TV Distance: {metrics['tvdist'].item()}')
+
                     results.append({'datapath':self.data_generator.path, 
                                     'batch_size': self.config.batch_size, 
-                                    'embedding_dim':self.model.config.embedding_dim, 
+                                    'context_dim':self.model.config.context_dim,
+                                    'output_nlayers': self.model.config.output.n_layers,
+                                    'output_hidden_dim': self.model.config.output.hidden_dim,
                                     'n_features':self.model.config.n_features,
-                                    'step': step,'loss':loss, 'tv_dist': tvdist.item(),
-                                    'aggregator': self.model.config.aggregator.type,
-                                    'n_layers': self.model.config.aggregator.n_layers,
-                                    'n_heads': self.model.config.aggregator.n_heads,
-                                    'i_in_context': self.model.config.aggregator.i_in_context}
-                                    ) if results is not None else None
+                                    'step': step,'loss':loss,
+                                    **metrics}) if results is not None else None
+                    
+                    
             if step - last_save >= self.config.save_interval:
                 last_save = step
                 torch.save(self.model.state_dict(), self.path + f'/model_{step}.pth')
                 pd.DataFrame(results).to_csv(results_path, index=False)
-                    
+            a = time.time()  
         
 def get_model_data_params(row, model, data_generator):
     params = om.create(row)    
@@ -190,23 +265,20 @@ def get_model_data_params(row, model, data_generator):
 
 if __name__ == '__main__':
     
-    from model import Model
-    from data import DataGenerator
-    from argparse import ArgumentParser
-    from omegaconf import OmegaConf as om
-    import time
+    
     parser = ArgumentParser()
     parser.add_argument('--config', type = str, default='config.yaml')
     parser.add_argument('--debug', action='store_true', default=False)
-    parser.add_argument('--multiple', action='store_true', default=True)
+    parser.add_argument('--multiple', action='store_true', default=False)
     parser.add_argument('--dryrun', action='store_true', default=False)
     parser.add_argument('--configs', type = str, default='configs_all.csv')
     parser.add_argument('--datas', type = str, default='datas.csv')
     parser.add_argument('--results', type = str, default='results_all.csv')
+    parser.add_argument('--results_temp', type = str, default='results_temp.csv')
     parser.add_argument('--save_dir', type = str, default='checkpoints')
-    parser.add_argument('--nlayers',type=int, default = 2)
-    parser.add_argument('--nheads', type=int, default = 2)
-    parser.add_argument('--embedding_dim', type=int, default= 64)
+    parser.add_argument('--nlayers',type=int, default = 0)
+    parser.add_argument('--context_dim', type=int, default = 128)
+    parser.add_argument('--hidden_dim', type=int, default= 32)
     parser.add_argument('--datapath', type=str, default='all')
     parser.add_argument('--nfeatures', type=int, default=10)
     parser.add_argument('--batchsize', type=int, default=128)
@@ -242,7 +314,6 @@ if __name__ == '__main__':
             ## get sets of configurations that have already been run
             results_f = results_pd[columns]
             results_f = results_f.drop_duplicates()
-            results_f = results_f.fillna('')
             results_f = results_f.to_dict('records')
             
 
@@ -264,19 +335,14 @@ if __name__ == '__main__':
 
             config_.data.path = row['datapath']
             config_.model.n_features = config_.data.n_features = int(row['n_features'])
-            config_.model.embedding_dim = int(row['embedding_dim'])
-            config_.model.aggregator.type = row['aggregator']
-            config_.model.aggregator.n_layers = int(row['n_layers'])
-            config_.model.aggregator.n_heads = int(row['n_heads'])
-            config_.model.aggregator.i_in_context = row['i_in_context']
+            config_.model.context_dim = int(row['context_dim'])
+            config_.model.output.n_layers = row['n_layers']
+            config_.model.output.hidden_dim = int(row['hidden_dim'])
 
             config_.train.save_dir = args.save_dir
 
-            if  row[columns].fillna('').to_dict() in results_f:
-                ## if the configuration has already been run
-                continue
-
             torch.manual_seed(135)
+            torch.mps.manual_seed(135)
             torch.cuda.manual_seed(135)
             model = Model(config_.model).to(config_.train.device)
             data_generator = data_generators.get(config_.data, DataGenerator(config_.data))
@@ -285,10 +351,10 @@ if __name__ == '__main__':
                 print(f"""Training on {data_generator.sampler.num_samples} 
                     samples for {config_.train.n_steps} steps 
                     with a batch size of {config_.train.batch_size} 
-                    with emb_dim {config_.model.embedding_dim}, 
-                    n_features {config_.model.n_features} 
-                    and context aggregator {config_.model.aggregator.type},
-                    and n_layers {config_.model.aggregator.n_layers}""")
+                    with context dim {config_.model.context_dim}, 
+                    hidden dim {config_.model.output.hidden_dim},
+                    n_layers {config_.model.output.n_layers},
+                    n_features {config_.model.n_features} """)
             trainer = Trainer(model, data_generator, config_.train, args)
 
             trainer.train_eval(results)
@@ -296,20 +362,20 @@ if __name__ == '__main__':
 
     else:
         ## run for a single configuration
-        torch.manual_seed(135)
-        torch.cuda.manual_seed(135)
+        torch_rand(135)
         model = Model(config.model).to(config.train.device)
-        print('Model parameters:', sum(model.parameter_count.values()))
+        # print('Model parameters:', sum(model.parameter_count.values()))
         data_generator = DataGenerator(config.data)
         print(f"""Training on {data_generator.sampler.num_samples} samples
                for {config.train.n_steps} steps 
-               with emb_dim {config.model.embedding_dim}, 
-               n_features {config.data.n_features},
-               with a batch size of {config.train.batch_size}
-               and context aggregator {config.model.aggregator.type},
-               and n_layers {config.model.aggregator.n_layers}""")
+               on {config.data.path},
+               n_features {config.data.n_features}
+               and context dim {config.model.context_dim}, 
+               and hidden dim {config.model.output.hidden_dim},
+               and n_layers {config.model.output.n_layers},
+               with a batch size of {config.train.batch_size} """)
         trainer = Trainer(model, data_generator, config.train, args)
         results = []
-        trainer.train_eval(results, args.results)
-        pd.DataFrame(results).to_csv(args.results, index=False)
+        trainer.train_eval(results, args.results_temp)
+        pd.DataFrame(results).to_csv(args.results_temp, index=False)
 

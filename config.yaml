@@ -20,9 +20,9 @@ model:
   n_vocab: 2
   n_features: '${data.n_features}'
   data_type: '${data.type}'
-  embedding_dim: 128
+  
   dropout: 0.5
-  aggregator: 
+  context_dim: 
     type: 'transformer'
     n_heads: 4
     n_layers: 2

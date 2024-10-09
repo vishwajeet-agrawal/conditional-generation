@@ -7,6 +7,8 @@ import numpy as np
 from torch.nn import functional as F
 from util import generate_permutations
 import math
+from functools import cached_property
+
 
 class Dropout(nn.Dropout):
     def forward(self, input: torch.Tensor) -> torch.Tensor:

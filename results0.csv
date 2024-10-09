@@ -1,3 +1,0 @@
-,datapath,batch_size,embedding_dim,n_features,caggregate,step,loss,tv_dist
-0,datasets/1.csv,256,100,10,avg,250,0.4970096564292908,0.07331341534121874
-1,datasets/1.csv,256,100,10,avg,500,0.4872832053899765,0.06868383517000413

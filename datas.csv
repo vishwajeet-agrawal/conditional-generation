@@ -1,0 +1,4 @@
+path,n_features,source,max_parents,num_edges,size_of_cpt
+0,10,dag,6,32,442
+3,25,dag,5,84,1220
+4,50,dag,3,116,1294

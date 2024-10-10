@@ -109,7 +109,11 @@ class DataFromDAG(BaseGenerator):
         # self.infer_bp = BeliefPropagation(self.bn)
         # self.infer_wlw = WeightedLikelihoodWeighting(self.bn)
         # self.infer_gb = GibbsSampling(self.bn)
-        self.custom_config = {'size_of_cpt': self.size_of_cpt, 'num_edges': self.num_edges, 'max_parents': self.max_parents}
+        if config.load:
+            config = self.load_stat(config.path)
+            self.custom_config = {'size_of_cpt': config['size_of_cpt'], 'num_edges': config['num_edges'], 'max_parents': config['max_parents']}
+        else:
+            self.custom_config = {'size_of_cpt': self.size_of_cpt, 'num_edges': self.num_edges, 'max_parents': self.max_parents}
 
     def networkx_to_pgmpy(self):
         G = self.G
@@ -200,7 +204,11 @@ class DataFromDAG(BaseGenerator):
         with open(path, 'rb') as f:
             G = pickle.load(f)
         return G
-
+    def load_stat(self, path):
+        path = path + '/config.yaml'
+        with open(path, 'r') as f:
+            config = om.load(f)
+        return config
     def save(self, path):
         ans = dict()
         ans['n_nodes'] = self.n_features
@@ -295,6 +303,7 @@ class DataGenerator:
                     os.makedirs(fol)
                     return fol
            
+<<<<<<< HEAD
     def sample_conditional(self, N, seed = None, nomask = False):  
         if seed is not None:
             np.random.seed(seed)
@@ -302,6 +311,11 @@ class DataGenerator:
         S = np.zeros((N, self.n_features), dtype = int)        
         I = np.zeros(N, dtype = int)
         J = np.zeros(N, dtype = int)
+=======
+    def sample_conditional(self, N, seed = None):  
+        X = self.sampler.sample_joint(N, seed)
+        S = np.zeros((N, self.n_features), dtype = int)
+>>>>>>> 3da66ed (restore data)
         
         if not nomask:
             if self.config.mask.distribution == MaskDistributionType.truncnorm:

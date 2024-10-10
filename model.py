@@ -223,33 +223,51 @@ class ContextToOutput(nn.Module):
         self.n_features = config.n_features
         self.hidden_dim = config.output.hidden_dim
         self.n_layers = config.output.n_layers - 1  
-
-        if self.n_layers >= 0:
-            ## or config.output.nlayers >= 1   (number of non linear layers)
-            self.input_layer = nn.Linear(self.context_dim, self.hidden_dim * self.n_features)
-            self.middle_layers = nn.ModuleList(
-                [nn.Linear(self.hidden_dim, self.hidden_dim * self.n_features) for _ in range(self.n_layers)]
-            )
-            self.act = nn.ReLU()
-            self.output_layer = nn.Linear(self.hidden_dim, self.config.n_vocab * self.n_features)
+        self.common_g = config.output.common_g  
+        if not self.common_g:
+            if self.n_layers >= 0:
+                ## or config.output.nlayers >= 1   (number of non linear layers)
+                self.input_layer = nn.Linear(self.context_dim, self.hidden_dim * self.n_features)
+                self.input_bn = nn.BatchNorm1d(self.hidden_dim)
+                self.middle_layers = nn.ModuleList(
+                    [nn.Linear(self.hidden_dim, self.hidden_dim * self.n_features) for _ in range(self.n_layers)]
+                )
+                self.batch_norms = nn.ModuleList([nn.BatchNorm1d(self.hidden_dim) for _ in range(self.n_layers)])
+                self.act = nn.ReLU()
+                self.output_layer = nn.Linear(self.hidden_dim, self.config.n_vocab * self.n_features)
+            else:
+                ## a single linear layer (no non-linearity )
+                self.skip_layer = nn.Linear(self.context_dim, self.config.n_vocab * self.n_features)
         else:
-            ## a single linear layer (no non-linearity )
-            self.skip_layer = nn.Linear(self.context_dim, self.config.n_vocab * self.n_features)
-    
+            if self.n_layers >= 0:
+                ## or config.output.nlayers >= 1   (number of non linear layers)
+                self.input_layer = nn.Linear(self.context_dim, self.hidden_dim )
+                self.input_bn = nn.BatchNorm1d(self.hidden_dim)
+                self.middle_layers = nn.ModuleList(
+                    [nn.Linear(self.hidden_dim, self.hidden_dim ) for _ in range(self.n_layers)]
+                )
+                self.batch_norms = nn.ModuleList([nn.BatchNorm1d(self.hidden_dim) for _ in range(self.n_layers)])
+                self.act = nn.ReLU()
+                self.output_layer = nn.Linear(self.hidden_dim, self.config.n_vocab )
+            else:
+                ## a single linear layer (no non-linearity )
+                self.skip_layer = nn.Linear(self.context_dim, self.config.n_vocab )
+
     def select_features(self, H, I):
-        H = H.view(H.size(0), self.n_features, -1)
-        H = (H * I.unsqueeze(-1)).sum(dim = 1)
+        if not self.common_g:
+            H = H.view(H.size(0), self.n_features, -1)
+            H = (H * I.unsqueeze(-1)).sum(dim = 1)
         return H
     
     def forward(self, Fxs, I):
         if self.n_layers >= 0:
             i_context = self.input_layer(Fxs)
             i_context = self.select_features(i_context, I)
-            i_context = self.act(i_context)
+            i_context = self.act(self.input_bn(i_context)) + i_context
             for l in range(self.n_layers):
-                i_context = self.middle_layers[l](i_context)
-                i_context = self.select_features(i_context, I)
-                i_context = self.act(i_context)
+                i_context_ = self.middle_layers[l](i_context)
+                i_context_ = self.select_features(i_context_, I)
+                i_context = self.act(self.batch_norms[l](i_context_)) + i_context
             logits = self.output_layer(i_context)
             logits = self.select_features(logits, I)
         else:
@@ -437,9 +455,9 @@ class TransformerAggregator(ContextAggregator):
     def __init__(self, config):
         super(TransformerAggregator, self).__init__(config)
         self.n_heads = config.aggregator.n_heads
-        self.qkv_proj = nn.ModuleList([nn.Linear(self.embedding_dim, 3 * self.embedding_dim, bias = False) 
+        self.qkv_proj = nn.ModuleList([nn.Linear(self.embedding_dim, 3 * self.embedding_dim, bias = True) 
                                       for _ in range(self.n_layers)])
-        self.out_proj = nn.ModuleList([nn.Linear(self.embedding_dim, self.embedding_dim, bias = False) 
+        self.out_proj = nn.ModuleList([nn.Linear(self.embedding_dim, self.embedding_dim, bias = True) 
                                        for _ in range(self.n_layers)])
 
     def get_attn_mask(self, S):

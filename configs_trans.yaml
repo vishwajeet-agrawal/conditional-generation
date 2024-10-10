@@ -1,0 +1,5 @@
+embeding_dim: [2, 8, 16]
+n_heads: [1, 2, 4]
+n_layers: [1, 4, 9]
+
+

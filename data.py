@@ -303,7 +303,6 @@ class DataGenerator:
                     os.makedirs(fol)
                     return fol
            
-<<<<<<< HEAD
     def sample_conditional(self, N, seed = None, nomask = False):  
         if seed is not None:
             np.random.seed(seed)
@@ -311,11 +310,6 @@ class DataGenerator:
         S = np.zeros((N, self.n_features), dtype = int)        
         I = np.zeros(N, dtype = int)
         J = np.zeros(N, dtype = int)
-=======
-    def sample_conditional(self, N, seed = None):  
-        X = self.sampler.sample_joint(N, seed)
-        S = np.zeros((N, self.n_features), dtype = int)
->>>>>>> 3da66ed (restore data)
         
         if not nomask:
             if self.config.mask.distribution == MaskDistributionType.truncnorm:

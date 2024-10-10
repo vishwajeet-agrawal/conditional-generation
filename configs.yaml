@@ -1,0 +1,4 @@
+context_dim: [32, 128, 512]
+n_layers: [0, 1]
+hidden_dim: ${context_dim}
+

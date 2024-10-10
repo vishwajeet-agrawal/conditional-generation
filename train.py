@@ -8,6 +8,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 from model import GeneralModel as Model
+from model import ExpModel
 from data import DataGenerator
 from argparse import ArgumentParser
 from omegaconf import OmegaConf as om
@@ -124,22 +125,48 @@ class Trainer:
         P = torch.from_numpy(P).to(torch.float32).to(self.config.device)
         P = P[:, :4]
         tP_i_S, tP_j_S, tP_i_S_j, tP_j_S_i = P.chunk(4, dim = -1)
+        tP_i_S = tP_i_S.squeeze(-1)
+        tP_j_S = tP_j_S.squeeze(-1)
+        tP_i_S_j = tP_i_S_j.squeeze(-1)
+        tP_j_S_i = tP_j_S_i.squeeze(-1)
         
-        P_i_S, P_j_S, P_i_S_j, P_j_S_i = self.model.evaluate_batched(X, (S, I, J), 'probability_ij_S', self.config.batch_size)
+        P_i_S, P_j_S, P_i_S_j, P_j_S_i, lp_i_S, lp_j_S, lp_i_Sj, lp_j_Si = self.model.evaluate_batched(X, (S, I, J), 'probability_ij_S', self.config.batch_size)
         
         tvdist = (tP_i_S - P_i_S).abs() + (tP_j_S - P_j_S).abs() + (tP_i_S_j - P_i_S_j).abs() + (tP_j_S_i - P_j_S_i).abs()
+        
         tvdist = tvdist / 4
-        return tvdist
+        
+        logtvdist = (torch.log(tP_i_S) -  lp_i_S).abs() \
+            + (torch.log(tP_j_S) - lp_j_S).abs() \
+            + (torch.log(tP_i_S_j) - lp_i_Sj).abs() \
+            + (torch.log(tP_j_S_i) - lp_j_Si).abs()
+        
+        logtvdist = logtvdist / 4
+
+        return tvdist, logtvdist
     
+    # def estimate_tvdist_each1(self):
+    #     X, S, I, J, P = self.data_generator.test_data
+    #     I = np.eye(X.shape[-1])[I]
+    #     J = np.eye(X.shape[-1])[J]
+    #     S = S + J
+    #     X, S, I = self.to_torch(X, S, I)
+    #     tP = torch.from_numpy(P[:, 2]).to(torch.float32).to(self.config.device)
+    #     P_iS = self.model.evaluate_batched(X, (I, S), 'probability_i_S', self.config.batch_size)[0]
+        
+    #     tvdist = (tP - P_iS).abs()
+    #     return tvdist
+        
     def estimate_tvdist_nocontext(self):
         X, S, I, J, P = self.data_generator.test_data
         I = np.eye(X.shape[-1])[I]
         X, I = self.to_torch(X, I)
         S = 1 - I
-        tP = torch.form_numpy(P).to(self.config.device)[:, 4]
-        P = self.model.evaluate_batched(X, (S, I), 'probability_i_S', self.config.batch_size)
-        tvdist = (tP - P).abs().mean()
-        return tvdist
+        tP = torch.from_numpy(P).to(torch.float32).to(self.config.device)[:, 4]
+        P, lP = self.model.evaluate_batched(X, (I, S), 'probability_i_S', self.config.batch_size)
+        tvdist = (tP - P).abs().mean().item()
+        logtvdist = (torch.log(tP) - lP).abs().mean().item()
+        return tvdist, logtvdist
     
     def save_model(self):
         torch.save(self.model.state_dict(), self.path + '/model.pth')
@@ -164,10 +191,21 @@ class Trainer:
         y_rank = torch.argsort(torch.argsort(y)).float()
         x_mean = x_rank.mean()
         y_mean = y_rank.mean()
-        covariane = torch.mean((x_rank - x_mean) * (y_rank - y_mean))
-        x_std = x_rank.std()
-        y_std = y_rank.std()
+        covariane = torch.mean((x_rank - x_mean) * (y_rank - y_mean)).item()
+        x_std = x_rank.std().item() + 1e-6
+        y_std = y_rank.std().item() + 1e-6
         return covariane / (x_std * y_std)
+    
+    def pearson_corr(self, x, y):
+        # Calculate means
+        mean_x = torch.mean(x)
+        mean_y = torch.mean(y)
+        # Calculate numerator and denominator for Pearson correlation
+        covariance = torch.mean((x - mean_x) * (y - mean_y)).item()
+        x_std = x.std().item() + 1e-6
+        y_std = y.std().item() + 1e-6
+        return covariance / (x_std * y_std)
+      
     
     def flatten_metrics(self, metrics):
         metrics_flat = {}
@@ -181,28 +219,32 @@ class Trainer:
     
     def get_metrics(self):
         metrics = {}
+        X, S, I, J, P = self.data_generator.test_data
+        I = np.eye(X.shape[-1])[I]
+        J = np.eye(X.shape[-1])[J]
+        X, S, I, J = self.to_torch(X, S, I, J)
         if self.config.fullcontext:
-            metrics['tvdist'] = self.estimate_tvdist_nocontext()
+            ## p(x_i | x_{-i})
+            metrics['tvdist'], metrics['logtvdist'] = self.estimate_tvdist_nocontext()
             if self.config.eval.consistency.path:
-                metrics['path_ct_std'], metrics['path_ct_stdr'] = self.model.evaluate_batched(X, [], 'path_consistency', self.config.batch_size)
+                metrics['path_ct_std'], metrics['path_ct_cv'] = self.model.evaluate_batched(X, [], 'path_consistency', self.config.batch_size)
         else:
-            tvdist = self.estimate_tvdist_each()
-            metrics['tvdist'] = tvdist.mean()
-       
-            X, S, I, J, P = self.data_generator.test_data
-            I = np.eye(X.shape[-1])[I]
-            J = np.eye(X.shape[-1])[J]
-            X, S, I, J = self.to_torch(X, S, I, J)
-            if self.config.eval.consistency.autoregressive:
-                metrics['auto_ct_std'], metrics['auto_ct_stdr'] = self.model.evaluate_batched(X, [], 'autoregressive_consistency', self.config.batch_size)
+            tvdist, logtvdist = self.estimate_tvdist_each()
+            metrics['tvdist'] = tvdist.mean().item()       
+            metrics['logtvdist'] = logtvdist.mean().item()         
 
+            if self.config.eval.consistency.autoregressive:
+                metrics['auto_ct_std'], metrics['auto_ct_cv'] = self.model.evaluate_batched(X, [], 'autoregressive_consistency', self.config.batch_size)
+                
             if self.config.eval.consistency.swap:
-                pdiffl1, pdiffl2, pdifflog = self.model.evaluate_batched(X, [S, I, J], 'swap_consistency', self.config.batch_size)
-                metrics['swap_ct'] = dict(l1 = pdiffl1.mean(), l2 = pdiffl2.mean(), log = pdifflog.mean())
+                pdiffl1,  pdifflog = self.model.evaluate_batched(X, [S, I, J], 'swap_consistency', self.config.batch_size)
+                metrics['swap_ct'] = dict(l1 = pdiffl1.mean().item(), log = pdifflog.mean().item())
                 ## correlation between tvdist and swap_ct
-                metrics['correlations_swapct_tvdist'] = dict(l1 = self.spearman_corr(tvdist, pdiffl1),
-                                                            l2 = self.spearman_corr(tvdist, pdiffl2),
-                                                            log = self.spearman_corr(tvdist, pdifflog))
+                metrics['correlations_swapct_tvdist'] = dict(l1 = self.pearson_corr(tvdist, pdiffl1),
+                                                            log = self.pearson_corr(logtvdist, pdifflog))
+            if self.config.eval.consistency.path:
+                metrics['path_ct_std'], metrics['path_ct_cv'] = self.model.evaluate_batched(X, [], 'path_consistency', self.config.batch_size)
+
         return metrics
 
 
@@ -219,15 +261,22 @@ class Trainer:
             b = time.time()
             print(f'Get metrics time: {b-a}')
             if self.config.print_log:
-                print(f'Step {step}, TV Distance: {metrics['tvdist'].item()}')
-                
+                print(f'Step {step}, TV Distance: {metrics['tvdist']}')
+            results.append({'datapath':self.data_generator.path, 
+                                    'batch_size': self.config.batch_size, 
+                                    'context_dim':self.model.config.context_dim,
+                                    'output_nlayers': self.model.config.output.n_layers,
+                                    'output_hidden_dim': self.model.config.output.hidden_dim,
+                                    'n_features':self.model.config.n_features,
+                                    'step': step,'loss':0,
+                                    **metrics}) if results is not None else None
+
         for i in range(self.config.n_steps // num_batches):
             
             loss = self.train_epoch()
             step += num_batches
             self.scheduler.step(step)
-
-            if step - last_log >= self.config.log_interval:
+            if (step <= 500 and step % 100 == 0) or (step - last_log >= self.config.log_interval):
                 b = time.time()
                 print(f'Training Time: {b-a}')
                 last_log = step
@@ -238,7 +287,7 @@ class Trainer:
                     b = time.time()
                     print(f'Get metrics time: {b-a}')
                     if self.config.print_log:
-                        print(f'Step {step}, Loss: {loss}', f'TV Distance: {metrics['tvdist'].item()}')
+                        print(f'Step {step}, Loss: {loss}', f'TV Distance: {metrics['tvdist']}, Log TV Distance: {metrics["logtvdist"]}')
 
                     results.append({'datapath':self.data_generator.path, 
                                     'batch_size': self.config.batch_size, 
@@ -248,13 +297,13 @@ class Trainer:
                                     'n_features':self.model.config.n_features,
                                     'step': step,'loss':loss,
                                     **metrics}) if results is not None else None
-                    
+                a = time.time()  
                     
             if step - last_save >= self.config.save_interval:
                 last_save = step
                 torch.save(self.model.state_dict(), self.path + f'/model_{step}.pth')
                 pd.DataFrame(results).to_csv(results_path, index=False)
-            a = time.time()  
+            
         
 def get_model_data_params(row, model, data_generator):
     params = om.create(row)    
@@ -274,7 +323,7 @@ if __name__ == '__main__':
     parser.add_argument('--configs', type = str, default='configs_all.csv')
     parser.add_argument('--datas', type = str, default='datas.csv')
     parser.add_argument('--results', type = str, default='results_all.csv')
-    parser.add_argument('--results_temp', type = str, default='results_temp.csv')
+    parser.add_argument('--results_temp', type = str, default='results_temp_25.csv')
     parser.add_argument('--save_dir', type = str, default='checkpoints')
     parser.add_argument('--nlayers',type=int, default = 0)
     parser.add_argument('--context_dim', type=int, default = 128)
@@ -366,14 +415,14 @@ if __name__ == '__main__':
         model = Model(config.model).to(config.train.device)
         # print('Model parameters:', sum(model.parameter_count.values()))
         data_generator = DataGenerator(config.data)
-        print(f"""Training on {data_generator.sampler.num_samples} samples
-               for {config.train.n_steps} steps 
-               on {config.data.path},
-               n_features {config.data.n_features}
-               and context dim {config.model.context_dim}, 
-               and hidden dim {config.model.output.hidden_dim},
-               and n_layers {config.model.output.n_layers},
-               with a batch size of {config.train.batch_size} """)
+        # print(f"""Training on {data_generator.sampler.num_samples} samples
+        #        for {config.train.n_steps} steps 
+        #        on {config.data.path},
+        #        n_features {config.data.n_features}
+        #        and context dim {config.model.context_dim}, 
+        #        and hidden dim {config.model.output.hidden_dim},
+        #        and n_layers {config.model.output.n_layers},
+        #        with a batch size of {config.train.batch_size} """)
         trainer = Trainer(model, data_generator, config.train, args)
         results = []
         trainer.train_eval(results, args.results_temp)

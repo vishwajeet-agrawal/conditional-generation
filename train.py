@@ -255,6 +255,7 @@ class Trainer:
         last_save = 0
         step = 0
         a = time.time()
+        
         with torch.no_grad():
             metrics = self.get_metrics()
             metrics = self.flatten_metrics(metrics)
@@ -353,25 +354,9 @@ if __name__ == '__main__':
 
         ## run for multiple datasets and configurations
         configs = pd.read_csv(args.configs)
-        columns = ['n_features','datapath','embedding_dim','aggregator','n_layers','n_heads','i_in_context']
         
-        if os.path.exists(args.results):
-            # Load previous results
-            results_pd = pd.read_csv(args.results)
-            results = results_pd.to_dict('records')
-
-            ## get sets of configurations that have already been run
-            results_f = results_pd[columns]
-            results_f = results_f.drop_duplicates()
-            results_f = results_f.to_dict('records')
-            
-
-        else:
-            results = []
-            results_f = [{}]
-
         
-
+        results = []
         # configs = configs[['n_features', 'embedding_dim', 'context_aggregator', 'n_layers']]
         # configs = configs.drop_duplicates()
         data_generators = dict()
@@ -384,26 +369,32 @@ if __name__ == '__main__':
 
             config_.data.path = row['datapath']
             config_.model.n_features = config_.data.n_features = int(row['n_features'])
-            config_.model.context_dim = int(row['context_dim'])
-            config_.model.output.n_layers = row['n_layers']
-            config_.model.output.hidden_dim = int(row['hidden_dim'])
+            if config_.model.aggregator.type == 'transformer':
+                config_.model.aggregator.n_heads = int(row['n_heads'])
+                config_.model.embedding_dim = int(row['embedding_dim'])
+                n_layers = config_.model.aggregator.n_layers = int(row['n_layers'])
+                
+            else:
+                config_.model.context_dim = int(row['context_dim'])
+                n_layers = config_.model.output.n_layers = row['n_layers']
+                config_.model.output.hidden_dim = int(row['hidden_dim'])
 
             config_.train.save_dir = args.save_dir
-
+            config_.model.fullcontext = config_.train.fullcontext
             torch.manual_seed(135)
             torch.mps.manual_seed(135)
             torch.cuda.manual_seed(135)
-            model = Model(config_.model).to(config_.train.device)
+            if config_.model.aggregator.type == 'transformer':
+                model = ExpModel(config_.model).to(config_.train.device)
+            else:
+                model = Model(config_.model).to(config_.train.device)
             data_generator = data_generators.get(config_.data, DataGenerator(config_.data))
             data_generators[config_.data] = data_generator
-            if config.train.debug.print_log:
-                print(f"""Training on {data_generator.sampler.num_samples} 
-                    samples for {config_.train.n_steps} steps 
-                    with a batch size of {config_.train.batch_size} 
-                    with context dim {config_.model.context_dim}, 
-                    hidden dim {config_.model.output.hidden_dim},
-                    n_layers {config_.model.output.n_layers},
-                    n_features {config_.model.n_features} """)
+            print(f"""Training on {data_generator.sampler.num_samples} 
+                samples for {config_.train.n_steps} steps 
+                with a batch size of {config_.train.batch_size} 
+                n_layers {n_layers},
+                n_features {config_.model.n_features} """)
             trainer = Trainer(model, data_generator, config_.train, args)
 
             trainer.train_eval(results)
